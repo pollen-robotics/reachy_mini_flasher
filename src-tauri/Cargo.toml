@@ -1,0 +1,37 @@
+[package]
+name = "reachy-mini-flasher"
+version = "0.1.0"
+description = "Cross-platform tool to reflash ReachyMiniOS over USB and update the daemon over WiFi"
+authors = ["Reachy Mini Contributors"]
+edition = "2021"
+
+[lib]
+# The `_lib` suffix keeps the lib name unique so it doesn't conflict with the
+# bin name on Windows (see rust-lang/cargo#8519).
+name = "reachy_mini_flasher_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Flashing engine
+bmap-parser = "0.2"
+flate2 = "1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# USB detection (Reachy CM4 in download mode) + release download + cache paths
+nusb = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+dirs = "6"
+
+# macOS disk enumeration parses `diskutil -plist` output.
+# `sendfd` receives the privileged fd from `authopen` (SCM_RIGHTS) so the disk
+# write needs admin auth but NOT Full Disk Access.
+[target.'cfg(target_os = "macos")'.dependencies]
+plist = "1"
+sendfd = "0.4"

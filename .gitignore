@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-web/
+
+# Tauri
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# rpiboot build artifacts (regenerated in CI via scripts/fetch-rpiboot.sh)
+src-tauri/binaries/
+
+# Logs
+*.log
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Downloaded OS images / cache
+*.img
+*.img.gz
+*.zip
+*.bmap

@@ -1,0 +1,86 @@
+name: Release (macOS)
+
+# Builds the Reachy Mini Flasher macOS installers (.dmg) and attaches them to a
+# GitHub release. Triggered by pushing a version tag (e.g. `v0.1.0`), or
+# manually via the Actions tab.
+#
+# Two runners produce native builds so both Mac architectures are covered:
+#   - macos-14  -> Apple Silicon (aarch64)
+#   - macos-13  -> Intel        (x86_64)
+# Each runner builds `rpiboot` from source for its own arch, so the bundled
+# helper always matches the app it ships in.
+#
+# Code signing / notarization is OPTIONAL: if the APPLE_* secrets are set the
+# build is signed + notarized, otherwise an unsigned build is produced (users
+# then have to right-click > Open the first time).
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+          - runner: macos-13
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install rpiboot build deps
+        run: brew install libusb pkg-config
+
+      - name: Build & stage rpiboot (+ mass-storage-gadget64)
+        run: ./scripts/fetch-rpiboot.sh
+
+      - name: Install JS dependencies
+        run: npm ci
+
+      - name: Build, sign & release the macOS app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # --- Optional: code signing + notarization ---------------------------
+          # Leave these unset for an unsigned build. To sign + notarize, add all
+          # of them as repository secrets (see docs/WINDOWS.md's macOS note and
+          # https://tauri.app/distribute/sign/macos/).
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          # If the flasher lives in a subfolder of the repo, set projectPath here.
+          projectPath: .
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', github.run_number) }}
+          releaseName: 'Reachy Mini Flasher ${{ github.ref_name }}'
+          releaseDraft: true
+          prerelease: false
+          args: --target ${{ matrix.target }}
