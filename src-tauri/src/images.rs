@@ -11,6 +11,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
 use tauri::AppHandle;
 
 use crate::flash::emit_download;
@@ -19,11 +20,14 @@ use crate::sim;
 const RELEASES_API: &str =
     "https://api.github.com/repos/pollen-robotics/reachy-mini-os/releases/latest";
 
-/// Fast mirror: the HF dataset CDN (xet/LFS) is much quicker than GitHub
-/// releases. `latest.json` (published by the mirror CI) points at the current
-/// image/bmap; both are fetched from the same base. GitHub is the fallback.
+/// Fast mirror: a public HF Storage Bucket (xet CDN) is much quicker and more
+/// reliable than GitHub releases. Public bucket files are served anonymously at
+/// `.../buckets/<ns>/<name>/resolve/<path>` (buckets are non-versioned, so there
+/// is no revision segment). `latest.json` (published by the mirror CI) points at
+/// the current image/bmap; both are fetched from the same base. GitHub is the
+/// fallback.
 const HF_RESOLVE_BASE: &str =
-    "https://huggingface.co/datasets/pollen-robotics/reachy-mini-os/resolve/main";
+    "https://huggingface.co/buckets/pollen-robotics/reachy-mini-os/resolve";
 
 pub struct ResolvedImage {
     pub image_path: String,
@@ -75,7 +79,7 @@ pub fn resolve_image(app: &AppHandle) -> Result<ResolvedImage, String> {
     }
 }
 
-/// Download the image (and bmap) from the Hugging Face dataset mirror, using the
+/// Download the image (and bmap) from the Hugging Face bucket mirror, using the
 /// `latest.json` manifest to locate the current release assets.
 fn download_from_hf(app: &AppHandle, dir: &Path) -> Result<ResolvedImage, String> {
     let client = reqwest::blocking::Client::builder()
@@ -114,6 +118,19 @@ fn download_from_hf(app: &AppHandle, dir: &Path) -> Result<ResolvedImage, String
         &tag,
         true,
     )?;
+
+    // Verify the download against the manifest checksum before we ever touch the
+    // eMMC. This catches a corrupt/partial upload (or CDN mishap) early, and the
+    // "checksum" wording makes `looks_like_corrupt_image` trigger a re-download.
+    if let Some(expected) = json.get("sha256").and_then(|v| v.as_str()) {
+        let actual = sha256_file(&image_path)?;
+        if !actual.eq_ignore_ascii_case(expected.trim()) {
+            let _ = fs::remove_file(&image_path);
+            return Err(format!(
+                "image checksum mismatch: expected {expected}, got {actual}. Please retry."
+            ));
+        }
+    }
 
     let bmap_path = if let Some(bmap_rel) = json.get("bmap").and_then(|v| v.as_str()) {
         let p = dir.join(basename(bmap_rel));
@@ -282,6 +299,22 @@ fn download_latest_release(app: &AppHandle, dir: &Path) -> Result<ResolvedImage,
         image_path: image_path.to_string_lossy().to_string(),
         bmap_path,
     })
+}
+
+/// Stream a file through SHA-256 and return the lowercase hex digest. Used to
+/// verify a downloaded image against the mirror manifest before flashing.
+fn sha256_file(path: &Path) -> Result<String, String> {
+    let mut file = fs::File::open(path).map_err(|e| format!("failed to open for hashing: {e}"))?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1024 * 1024];
+    loop {
+        let n = file.read(&mut buf).map_err(|e| format!("failed to read: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn download_file(
