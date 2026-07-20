@@ -62,20 +62,18 @@ jobs:
       - name: Install JS dependencies
         run: npm ci
 
-      - name: Build, sign & release the macOS app
+      - name: Build & release the macOS app (unsigned)
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # --- Optional: code signing + notarization ---------------------------
-          # Leave these unset for an unsigned build. To sign + notarize, add all
-          # of them as repository secrets (see docs/WINDOWS.md's macOS note and
-          # https://tauri.app/distribute/sign/macos/).
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # --- Code signing + notarization: intentionally DISABLED -------------
+          # We do NOT reference any APPLE_* secret here on purpose: the
+          # pollen-robotics org exposes APPLE_* secrets (for the mobile app) that
+          # would otherwise be injected and make tauri-action attempt (and fail)
+          # a codesign with an incompatible certificate. Producing an unsigned
+          # build instead (users right-click > Open on first launch).
+          # To enable signing later, add repo-level APPLE_* secrets in the format
+          # tauri expects and re-add them here (see https://tauri.app/distribute/sign/macos/).
         with:
           # If the flasher lives in a subfolder of the repo, set projectPath here.
           projectPath: .
