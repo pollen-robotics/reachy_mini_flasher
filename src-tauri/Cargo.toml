@@ -22,7 +22,6 @@ serde_json = "1"
 # Flashing engine
 bmap-parser = "0.2"
 flate2 = "1"
-sha2 = "0.10"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # USB detection (Reachy CM4 in download mode) + release download + cache paths

@@ -40,12 +40,19 @@ non-versioned, so there is no revision segment).
 
 ## Flasher side
 
-`src-tauri/src/images.rs` resolves images HF-first:
+> **Note:** the flasher no longer reads from this bucket. GitHub release assets
+> are served from Azure Blob storage, which honours HTTP `Range`. A single
+> stream is throttled (~3 MB/s), so `src-tauri/src/images.rs` now downloads the
+> image over several parallel ranged connections, which saturates the link and
+> matches the CDN mirror's throughput without the extra moving part. The bucket
+> is kept around only as an optional public mirror.
 
-1. Fetch `https://huggingface.co/buckets/pollen-robotics/reachy-mini-os/resolve/latest.json`.
-2. Download the referenced `image` (+ `bmap`) from the same base.
-3. Verify the image against `sha256` from the manifest before flashing.
-4. If HF is unreachable, fall back to the GitHub releases API.
+`src-tauri/src/images.rs` resolves images GitHub-first:
 
-So the app already works before the mirror is populated (it just uses GitHub
-until `latest.json` exists).
+1. Newest `*.img` / `*.img.gz` / `*.zip` already in the local cache dir, else
+2. Fetch the latest release from the GitHub API and download the image asset
+   with `download_ranged` (parallel `Range` chunks) + the `bmap`.
+
+Integrity is verified at flash time by the `bmap` block checksums; a corrupt or
+truncated download trips `looks_like_corrupt_image`, which purges the cache and
+re-downloads on the next run.

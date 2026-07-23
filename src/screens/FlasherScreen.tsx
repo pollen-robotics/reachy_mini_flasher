@@ -25,12 +25,15 @@ import ToggleOnOutlined from '@mui/icons-material/ToggleOnOutlined';
 import UsbOutlined from '@mui/icons-material/UsbOutlined';
 import WarningAmberRounded from '@mui/icons-material/WarningAmberRounded';
 
-import powerStepImg from '@/assets/power-step.png';
-import headStepImg from '@/assets/head-disas-step.png';
-import switchStepImg from '@/assets/switch-step.png';
-import usbStepImg from '@/assets/usb-step.png';
 import reachyImg from '@/assets/reachy-builder.svg';
 import reachyAvatarImg from '@/assets/reachy.svg';
+import { ReachyStage } from '@/components/reachy-viz/ReachyStage';
+import {
+  ASSEMBLED,
+  CONNECT_STEPS_VIZ,
+  DONE_STEPS_VIZ,
+  type StepShot,
+} from '@/components/reachy-viz/shots';
 import { FONT_WEIGHT } from '@/design/tokens';
 import {
   detectReachy,
@@ -60,10 +63,6 @@ type StepItem = {
   label: string;
   Icon: SvgIconComponent;
   desc?: ReactNode;
-  helpImage?: string;
-  /** Focus a region of `helpImage` in the tooltip. `position` maps to CSS
-   * background-position, `zoom` to background-size (e.g. '230%'). */
-  helpCrop?: { position: string; zoom?: string };
 };
 
 /** Shared outlined-tag look (grey, relatively contrasted), used by inline
@@ -110,9 +109,7 @@ const CONNECT_STEPS: StepItem[] = [
       <>
         Make sure your Reachy is <S>switched off</S> before you start.
       </>
-    ),
-    helpImage: powerStepImg,
-  },
+    ),  },
   {
     label: "Open the robot's head",
     Icon: HandymanOutlined,
@@ -121,9 +118,7 @@ const CONNECT_STEPS: StepItem[] = [
         Use the <B>screwdriver</B> to <S>remove the 4 head screws</S>, then{' '}
         <S>lift the top shell</S> to reach the board.
       </>
-    ),
-    helpImage: headStepImg,
-  },
+    ),  },
   {
     label: 'Switch to DOWNLOAD',
     Icon: ToggleOnOutlined,
@@ -131,20 +126,16 @@ const CONNECT_STEPS: StepItem[] = [
       <>
         Find the small <B>SW1</B> switch and <S>push it toward</S> the <B>DOWNLOAD</B> label.
       </>
-    ),
-    helpImage: switchStepImg,
-  },
+    ),  },
   {
     label: 'Plug in the USB cable',
     Icon: UsbOutlined,
     desc: (
       <>
         <S>Connect the cable</S> to the <B>CM4 USB port</B> inside the head, and the{' '}
-        <S>other end to your computer</S>.
+        <S>other end</S> to your <B>computer</B>.
       </>
-    ),
-    helpImage: usbStepImg,
-  },
+    ),  },
   {
     label: 'Power on the robot',
     Icon: PowerSettingsNewOutlined,
@@ -153,9 +144,7 @@ const CONNECT_STEPS: StepItem[] = [
         <S>Switch it back on</S> - after a few seconds you should hear the <B>fan spinning</B>. It
         boots in <B>download mode</B>, ready to flash.
       </>
-    ),
-    helpImage: powerStepImg,
-  },
+    ),  },
 ];
 
 const DONE_STEPS: StepItem[] = [
@@ -166,29 +155,24 @@ const DONE_STEPS: StepItem[] = [
       <>
         <S>Turn your Reachy off</S> now that the new system has been written.
       </>
-    ),
-    helpImage: powerStepImg,
-  },
+    ),  },
   {
-    label: 'Switch to NORMAL',
+    label: 'Switch to DEBUG',
     Icon: ToggleOffOutlined,
     desc: (
       <>
-        <S>Move</S> the <B>SW1</B> switch back from <B>DOWNLOAD</B> to its <B>NORMAL</B> position.
+        <S>Move</S> the <B>SW1</B> switch back from <B>DOWNLOAD</B> to its <B>DEBUG</B> position.
       </>
-    ),
-    helpImage: switchStepImg,
-  },
+    ),  },
   {
     label: 'Unplug the USB cable',
     Icon: UsbOutlined,
     desc: (
       <>
-        <S>Disconnect the USB cable</S> from the <B>CM4 port</B> inside the head.
+        <S>Disconnect the USB cable</S> from the <B>CM4 port</B> inside the head and from your{' '}
+        <B>computer</B>.
       </>
-    ),
-    helpImage: usbStepImg,
-  },
+    ),  },
   {
     label: 'Close the head',
     Icon: HandymanOutlined,
@@ -197,9 +181,7 @@ const DONE_STEPS: StepItem[] = [
         <S>Put the top shell back</S> and <S>screw the 4 head screws back in</S> with the{' '}
         <B>screwdriver</B>.
       </>
-    ),
-    helpImage: headStepImg,
-  },
+    ),  },
   {
     label: 'Power on the robot',
     Icon: PowerSettingsNewOutlined,
@@ -208,9 +190,7 @@ const DONE_STEPS: StepItem[] = [
         <S>Switch it back on</S> - it boots into the fresh <B>ReachyMiniOS</B>, back to its normal
         state.
       </>
-    ),
-    helpImage: powerStepImg,
-  },
+    ),  },
 ];
 
 /** Number of guided hardware instructions in the Connect wizard. */
@@ -312,6 +292,7 @@ const BODY_STACK_SX = {
 } as const;
 
 export function FlasherScreen() {
+  const theme = useTheme();
   const [status, setStatus] = useState<Status>('intro');
   const [connectStep, setConnectStep] = useState(0);
   const [doneStep, setDoneStep] = useState(0);
@@ -342,6 +323,41 @@ export function FlasherScreen() {
   statusRef.current = status;
   const connectStepRef = useRef(connectStep);
   connectStepRef.current = connectStep;
+
+  // Persistent 3D stage plumbing. The stage is rendered ONCE at the screen root
+  // and absolutely positioned over the wizard's media frame; we measure that
+  // frame's rectangle so the overlay lines up exactly and never remounts.
+  const rootRef = useRef<HTMLDivElement>(null);
+  const mediaNodeRef = useRef<HTMLElement | null>(null);
+  const [mediaRect, setMediaRect] = useState<{
+    top: number;
+    left: number;
+    width: number;
+    height: number;
+  } | null>(null);
+
+  const measureMedia = useCallback(() => {
+    const el = mediaNodeRef.current;
+    const root = rootRef.current;
+    if (!el || !root) return;
+    const r = el.getBoundingClientRect();
+    const rr = root.getBoundingClientRect();
+    setMediaRect({ top: r.top - rr.top, left: r.left - rr.left, width: r.width, height: r.height });
+  }, []);
+
+  const registerMedia = useCallback(
+    (el: HTMLDivElement | null) => {
+      mediaNodeRef.current = el;
+      if (el) requestAnimationFrame(measureMedia);
+    },
+    [measureMedia],
+  );
+
+  useEffect(() => {
+    const on = () => measureMedia();
+    window.addEventListener('resize', on);
+    return () => window.removeEventListener('resize', on);
+  }, [measureMedia]);
 
   const startPrefetch = useCallback(() => {
     setImageError(null);
@@ -619,10 +635,7 @@ export function FlasherScreen() {
     }
   })();
 
-  // Identity of the current screen. Reused both for the enter/exit animation and
-  // to re-key the ActionBar buttons, so a fresh Button (and TouchRipple) mounts
-  // per step - otherwise MUI keeps the same button node across steps and the
-  // ripple started on one step's action bleeds onto the next step's button.
+  // Identity of the current screen, used to key the enter/exit content animation.
   const viewKey =
     (effStatus === 'connect' && effConnectStep >= CONNECT_N) || effStatus === 'found'
       ? 'select'
@@ -632,8 +645,28 @@ export function FlasherScreen() {
           ? `done-${effDoneStep}`
           : effStatus;
 
+  // The persistent viz is only on-screen during the guided hardware wizards
+  // (connect + restart). Everywhere else it stays mounted but hidden.
+  const vizVisible =
+    (effStatus === 'connect' && effConnectStep < CONNECT_N) ||
+    (effStatus === 'done' && effDoneStep < DONE_N);
+  const isConnectStep = effStatus === 'connect' && effConnectStep < CONNECT_N;
+  const isDoneStep = effStatus === 'done' && effDoneStep < DONE_N;
+  // Declarative per-step spec (shot + target part state). The viz derives every
+  // animation from how this state changes step to step (see shots.ts).
+  const vizStep: StepShot = isDoneStep
+    ? DONE_STEPS_VIZ[effDoneStep]
+    : isConnectStep
+      ? CONNECT_STEPS_VIZ[effConnectStep]
+      : { shot: 'full', ...ASSEMBLED };
+  const { shot: shotId, ...vizState } = vizStep;
+  // Snap (vs animate) the parts when the wizard the viz belongs to changes, so a
+  // freshly-shown wizard opens already posed instead of animating on step 0.
+  const vizSnapKey = isDoneStep ? 'done' : isConnectStep ? 'connect' : 'idle';
+
   return (
     <Box
+      ref={rootRef}
       sx={{
         height: '100vh',
         display: 'flex',
@@ -704,10 +737,14 @@ export function FlasherScreen() {
             // update the list in place, not re-fade the whole screen.
             key={viewKey}
             style={{ width: '100%', display: 'flex', justifyContent: 'center' }}
-            initial={{ opacity: 0, y: 4 }}
+            // While the persistent viz is on screen, DON'T animate the text at
+            // all: skipping the enter animation avoids the 1-frame opacity-0
+            // flash (flicker) each step would otherwise show. The fade is kept
+            // only when entering/leaving a non-viz screen.
+            initial={vizVisible ? false : { opacity: 0, y: 4 }}
             animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -4 }}
-            transition={{ duration: 0.18 }}
+            exit={vizVisible ? { opacity: 1 } : { opacity: 0, y: -4 }}
+            transition={{ duration: vizVisible ? 0 : 0.18 }}
           >
             {effStatus === 'intro' ? (
               <IntroBody />
@@ -731,7 +768,7 @@ export function FlasherScreen() {
                   timedOut={waitTimedOut}
                 />
               ) : (
-                <ConnectStepBody step={CONNECT_STEPS[effConnectStep]} />
+                <ConnectStepBody step={CONNECT_STEPS[effConnectStep]} mediaRef={registerMedia} />
               )
             ) : effStatus === 'ready' ? (
               <ReadyBody version={effVersion} imageReady={effImageReady} />
@@ -743,7 +780,7 @@ export function FlasherScreen() {
               effDoneStep >= DONE_N ? (
                 <DoneBody />
               ) : (
-                <ConnectStepBody step={DONE_STEPS[effDoneStep]} />
+                <ConnectStepBody step={DONE_STEPS[effDoneStep]} mediaRef={registerMedia} />
               )
             ) : (
               <ErrorBody raw={effError} />
@@ -752,6 +789,19 @@ export function FlasherScreen() {
         </AnimatePresence>
       </Box>
       </Box>
+
+      <ReachyStage
+        shotId={shotId}
+        state={vizState}
+        snapKey={vizSnapKey}
+        visible={vizVisible}
+        rect={mediaRect}
+        card={{
+          border: `1px solid ${theme.palette.divider}`,
+          background: alpha(theme.palette.text.primary, 0.02),
+          radius: 12,
+        }}
+      />
 
       <ActionBar back={backAction} primary={primaryAction} />
 
@@ -881,54 +931,47 @@ function IntroBody() {
  * for the error-prone SW1 / USB steps, a large icon otherwise), a big title and a
  * one-line description. The only progress indicator is the unified top bar.
  */
-function ConnectStepBody({ step }: { step: StepItem }) {
+function ConnectStepBody({
+  step,
+  mediaRef,
+}: {
+  step: StepItem;
+  mediaRef?: (el: HTMLDivElement | null) => void;
+}) {
+  // Fixed height + top alignment so the media frame sits at the exact same
+  // on-screen position across every wizard step - the persistent 3D stage
+  // overlays it and must never shift, regardless of the description length.
   return (
-    <Stack spacing={2} sx={BODY_STACK_SX}>
+    <Stack spacing={2} sx={{ ...BODY_STACK_SX, height: BODY_MIN_H, justifyContent: 'flex-start' }}>
       <VisualSlot>
-        <StepMedia step={step} />
+        {/* Empty frame: the persistent ReachyStage (rendered once at the screen
+            root) is positioned right on top of this rectangle. */}
+        <MediaFrame frameRef={mediaRef} />
       </VisualSlot>
-      <Typography sx={TITLE_SX}>{step.label}</Typography>
+      {/* Extra top gap: the viz overlay is grown ~15% and overhangs the reserved
+          slot, so push the title down to keep clear breathing room below it. */}
+      <Typography sx={{ ...TITLE_SX, mt: 3 }}>{step.label}</Typography>
       {step.desc && <Typography sx={DESC_SX}>{step.desc}</Typography>}
     </Stack>
-  );
-}
-
-/** Fixed-size media zone for a wizard step: the cropped photo when the step
- * carries one, otherwise a large muted icon in a soft framed box. Keeps all
- * wizard screens the same height. */
-function StepMedia({ step }: { step: StepItem }) {
-  if (step.helpImage) {
-    return (
-      <MediaFrame>
-        <Box
-          role="img"
-          aria-label={step.label}
-          sx={{
-            width: '100%',
-            height: '100%',
-            backgroundImage: `url(${step.helpImage})`,
-            backgroundSize: step.helpCrop?.zoom ?? 'cover',
-            backgroundPosition: step.helpCrop?.position ?? '50% 50%',
-            backgroundRepeat: 'no-repeat',
-          }}
-        />
-      </MediaFrame>
-    );
-  }
-  const Icon = step.Icon;
-  return (
-    <MediaFrame>
-      <Icon sx={{ fontSize: 72, color: 'text.disabled', opacity: 0.5 }} />
-    </MediaFrame>
   );
 }
 
 /** The one shared visual container: fixed size, soft tinted background and a
  * hairline border. Photos fill it edge-to-edge; icons and the Reachy mark sit
  * centered inside. Used by every screen for a consistent composition. */
-function MediaFrame({ children }: { children: ReactNode }) {
+function MediaFrame({
+  children,
+  frameRef,
+}: {
+  children?: ReactNode;
+  frameRef?: (el: HTMLDivElement | null) => void;
+}) {
+  // Transparent spacer: it only reserves the layout footprint so the text
+  // never shifts. The visible card + robot are drawn by the persistent
+  // ReachyStage overlay (slightly larger, and never remounted / faded).
   return (
     <Box
+      ref={frameRef}
       sx={{
         width: MEDIA_W,
         height: MEDIA_H,
@@ -936,10 +979,6 @@ function MediaFrame({ children }: { children: ReactNode }) {
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        borderRadius: 3,
-        overflow: 'hidden',
-        bgcolor: (t) => alpha(t.palette.text.primary, 0.02),
-        border: (t) => `1px solid ${t.palette.divider}`,
       }}
     >
       {children}
@@ -1246,9 +1285,27 @@ function ErrorBody({ raw }: { raw: string }) {
  * action exists it is centered. Height is always reserved so screens without
  * actions (e.g. flashing) don't reflow. Every actionable button in the app lives
  * here - nothing floats in the bodies. */
+/** A click on Back/Next advances the step. The buttons keep STABLE per-role
+ * keys (they never remount between steps), so the click's TouchRipple plays out
+ * on the very button you pressed. We only defer the actual navigation by roughly
+ * the ripple's visible duration so it isn't cut off by the step swap, and guard
+ * against re-entrancy so an impatient double-click can't skip a step (which used
+ * to make the steps flicker and the 3D viz snap around). */
+const NAV_RIPPLE_MS = 200;
+
 function ActionBar({ back, primary }: { back: BarAction | null; primary: BarAction | null }) {
   const single = Number(!!back) + Number(!!primary) === 1;
   const btnSx = { borderRadius: 1, minWidth: 190, py: 1.1, fontSize: '1rem' } as const;
+  // One navigation in flight at a time; the ripple plays during the short delay.
+  const pending = useRef(false);
+  const defer = (fn: () => void) => () => {
+    if (pending.current) return;
+    pending.current = true;
+    window.setTimeout(() => {
+      pending.current = false;
+      fn();
+    }, NAV_RIPPLE_MS);
+  };
   return (
     <Box
       sx={{
@@ -1263,17 +1320,17 @@ function ActionBar({ back, primary }: { back: BarAction | null; primary: BarActi
         gap: 2,
       }}
     >
-      {/* Stable per-role keys: React matches these buttons by key instead of by
-          sibling position, so going from a single centered button to a Back+Next
-          pair never morphs the primary button into the back one (which used to
-          make the click ripple jump onto the wrong button). Within a screen the
-          same button node persists, so its ripple animates normally. */}
+      {/* Stable per-role keys: React matches these by key (not sibling position),
+          so a single centered button turning into a Back+Next pair never morphs
+          the primary into the back one (which used to make the ripple jump onto
+          the wrong button). The node persists across steps, so the ripple that a
+          click starts animates normally in place. */}
       {back && (
         <Button
           key="back"
           variant="outlined"
           startIcon={<ChevronLeftRounded />}
-          onClick={back.onClick}
+          onClick={defer(back.onClick)}
           disabled={back.disabled}
           sx={btnSx}
         >
@@ -1285,7 +1342,7 @@ function ActionBar({ back, primary }: { back: BarAction | null; primary: BarActi
           key="primary"
           variant="outlined"
           endIcon={<ChevronRightRounded />}
-          onClick={primary.onClick}
+          onClick={defer(primary.onClick)}
           disabled={primary.disabled}
           sx={btnSx}
         >

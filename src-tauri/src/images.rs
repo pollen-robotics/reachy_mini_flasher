@@ -5,13 +5,18 @@
 //!   2. otherwise, download the latest release asset from
 //!      `pollen-robotics/reachy-mini-os` (with progress)
 //!
+//! GitHub release assets are served from Azure Blob storage, which honours HTTP
+//! `Range` requests. A single stream is throttled per-connection (~3 MB/s in
+//! practice), so the ~1.7 GB image is downloaded with several parallel ranged
+//! connections, saturating the link (~2x faster, on par with a CDN mirror).
+//!
 //! In simulation mode a small local image is generated on the fly.
 
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-use sha2::{Digest, Sha256};
 use tauri::AppHandle;
 
 use crate::flash::emit_download;
@@ -20,14 +25,12 @@ use crate::sim;
 const RELEASES_API: &str =
     "https://api.github.com/repos/pollen-robotics/reachy-mini-os/releases/latest";
 
-/// Fast mirror: a public HF Storage Bucket (xet CDN) is much quicker and more
-/// reliable than GitHub releases. Public bucket files are served anonymously at
-/// `.../buckets/<ns>/<name>/resolve/<path>` (buckets are non-versioned, so there
-/// is no revision segment). `latest.json` (published by the mirror CI) points at
-/// the current image/bmap; both are fetched from the same base. GitHub is the
-/// fallback.
-const HF_RESOLVE_BASE: &str =
-    "https://huggingface.co/buckets/pollen-robotics/reachy-mini-os/resolve";
+/// Parallel-download tuning. GitHub/Azure throttles each connection, so we open
+/// several at once. 16 MiB chunks pulled from a shared work queue keep the
+/// workers balanced (a slow chunk doesn't strand an idle worker).
+const DL_WORKERS: usize = 8;
+const DL_CHUNK: u64 = 16 * 1024 * 1024;
+const DL_CHUNK_RETRIES: usize = 3;
 
 pub struct ResolvedImage {
     pub image_path: String,
@@ -65,102 +68,29 @@ pub fn resolve_image(app: &AppHandle) -> Result<ResolvedImage, String> {
 
     if let Some(found) = newest_local_image(&dir)? {
         // The image is already cached, so no download happens - but the UI still
-        // wants the version. Surface it from the mirror manifest (best-effort).
+        // wants the version. Surface it from the latest release (best-effort).
         emit_download(app, &cached_os_version(), 0, 0);
         return Ok(found);
     }
 
-    // Prefer the fast HF mirror; fall back to GitHub releases if unavailable.
-    match download_from_hf(app, &dir) {
-        Ok(found) => Ok(found),
-        Err(hf_err) => download_latest_release(app, &dir).map_err(|gh_err| {
-            format!("HF mirror unavailable ({hf_err}); GitHub fallback failed: {gh_err}")
-        }),
-    }
+    download_latest_release(app, &dir)
 }
 
-/// Download the image (and bmap) from the Hugging Face bucket mirror, using the
-/// `latest.json` manifest to locate the current release assets.
-fn download_from_hf(app: &AppHandle, dir: &Path) -> Result<ResolvedImage, String> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("reachy-mini-flasher")
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let manifest_url = format!("{HF_RESOLVE_BASE}/latest.json");
-    let body = client
-        .get(&manifest_url)
-        .send()
-        .and_then(|r| r.error_for_status())
-        .map_err(|e| format!("manifest fetch failed: {e}"))?
-        .text()
-        .map_err(|e| e.to_string())?;
-
-    let json: serde_json::Value =
-        serde_json::from_str(&body).map_err(|e| format!("manifest parse failed: {e}"))?;
-    let tag = json.get("tag").and_then(|v| v.as_str()).unwrap_or("latest").to_string();
-    let image_rel = json
-        .get("image")
-        .and_then(|v| v.as_str())
-        .ok_or("manifest has no image entry")?;
-
-    emit_download(app, &tag, 0, 0);
-
-    let basename = |rel: &str| rel.rsplit('/').next().unwrap_or(rel).to_string();
-
-    let image_name = basename(image_rel);
-    let image_path = dir.join(&image_name);
-    download_file(
-        app,
-        &client,
-        &format!("{HF_RESOLVE_BASE}/{image_rel}"),
-        &image_path,
-        &tag,
-        true,
-    )?;
-
-    // Verify the download against the manifest checksum before we ever touch the
-    // eMMC. This catches a corrupt/partial upload (or CDN mishap) early, and the
-    // "checksum" wording makes `looks_like_corrupt_image` trigger a re-download.
-    if let Some(expected) = json.get("sha256").and_then(|v| v.as_str()) {
-        let actual = sha256_file(&image_path)?;
-        if !actual.eq_ignore_ascii_case(expected.trim()) {
-            let _ = fs::remove_file(&image_path);
-            return Err(format!(
-                "image checksum mismatch: expected {expected}, got {actual}. Please retry."
-            ));
-        }
-    }
-
-    let bmap_path = if let Some(bmap_rel) = json.get("bmap").and_then(|v| v.as_str()) {
-        let p = dir.join(basename(bmap_rel));
-        download_file(app, &client, &format!("{HF_RESOLVE_BASE}/{bmap_rel}"), &p, &tag, false)?;
-        Some(p.to_string_lossy().to_string())
-    } else {
-        None
-    };
-
-    Ok(ResolvedImage {
-        image_path: image_path.to_string_lossy().to_string(),
-        bmap_path,
-    })
-}
-
-/// Best-effort OS version when flashing from cache: the mirror manifest `tag`,
+/// Best-effort OS version when flashing from cache: the latest release tag,
 /// falling back to "latest" when offline.
 fn cached_os_version() -> String {
-    fetch_manifest_tag().unwrap_or_else(|| "latest".to_string())
+    fetch_release_tag().unwrap_or_else(|| "latest".to_string())
 }
 
-/// Quick fetch of the current release tag from the HF mirror manifest.
-fn fetch_manifest_tag() -> Option<String> {
+/// Quick fetch of the current release tag from the GitHub releases API.
+fn fetch_release_tag() -> Option<String> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("reachy-mini-flasher")
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .ok()?;
     let body = client
-        .get(format!("{HF_RESOLVE_BASE}/latest.json"))
+        .get(RELEASES_API)
         .send()
         .ok()?
         .error_for_status()
@@ -168,7 +98,7 @@ fn fetch_manifest_tag() -> Option<String> {
         .text()
         .ok()?;
     let json: serde_json::Value = serde_json::from_str(&body).ok()?;
-    json.get("tag").and_then(|v| v.as_str()).map(|s| s.to_string())
+    json.get("tag_name").and_then(|v| v.as_str()).map(|s| s.to_string())
 }
 
 fn is_image_name(name: &str) -> bool {
@@ -283,7 +213,7 @@ fn download_latest_release(app: &AppHandle, dir: &Path) -> Result<ResolvedImage,
         .ok_or_else(|| "no image asset (.img.gz/.zip/.img) found in the latest release".to_string())?;
 
     let image_path = dir.join(&img_name);
-    download_file(app, &client, &img_url, &image_path, &version, true)?;
+    download_parallel(app, &client, &img_url, &image_path, &version)?;
 
     let bmap_path = if let Some((bmap_name, bmap_url)) =
         find(&|n| n.to_lowercase().ends_with(".bmap"))
@@ -301,20 +231,208 @@ fn download_latest_release(app: &AppHandle, dir: &Path) -> Result<ResolvedImage,
     })
 }
 
-/// Stream a file through SHA-256 and return the lowercase hex digest. Used to
-/// verify a downloaded image against the mirror manifest before flashing.
-fn sha256_file(path: &Path) -> Result<String, String> {
-    let mut file = fs::File::open(path).map_err(|e| format!("failed to open for hashing: {e}"))?;
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 1024 * 1024];
+/// Download `url` to `dest` over several parallel ranged connections.
+///
+/// A single GitHub/Azure connection is throttled (~3 MB/s), leaving the link
+/// mostly idle. We probe the total size (and confirm Range support) with a
+/// 1-byte ranged GET, preallocate the `.part`, then let `DL_WORKERS` workers
+/// pull `DL_CHUNK`-sized chunks from a shared cursor and write each to its byte
+/// offset. Falls back to a single stream if the server ignores `Range`.
+fn download_parallel(
+    app: &AppHandle,
+    client: &reqwest::blocking::Client,
+    url: &str,
+    dest: &Path,
+    version: &str,
+) -> Result<(), String> {
+    let Some(total) = probe_total_with_ranges(client, url) else {
+        // Ranges unsupported or size unknown: a single stream is the best we can do.
+        return download_file(app, client, url, dest, version, true);
+    };
+    let report = |w: u64, t: u64| emit_download(app, version, w, t);
+    download_ranged(client, url, dest, total, &report)
+}
+
+/// Core of the parallel downloader, decoupled from Tauri so it can be tested.
+/// Preallocates `dest.part`, has `DL_WORKERS` workers pull `DL_CHUNK` ranges
+/// from a shared cursor, writes each to its offset, then atomically renames.
+/// `report(downloaded, total)` is invoked periodically from a monitor thread.
+fn download_ranged(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    dest: &Path,
+    total: u64,
+    report: &(dyn Fn(u64, u64) + Sync),
+) -> Result<(), String> {
+    let part = dest.with_extension("part");
+    let _ = fs::remove_file(&part);
+    {
+        let f = fs::File::create(&part).map_err(|e| e.to_string())?;
+        f.set_len(total)
+            .map_err(|e| format!("failed to preallocate download: {e}"))?;
+    }
+
+    let num_chunks = total.div_ceil(DL_CHUNK);
+    let next = AtomicUsize::new(0);
+    let downloaded = AtomicU64::new(0);
+    let failed = AtomicBool::new(false);
+    let first_err = std::sync::Mutex::new(None::<String>);
+
+    report(0, total);
+
+    std::thread::scope(|scope| {
+        // Progress monitor: emit the aggregated byte count until workers finish.
+        scope.spawn(|| {
+            loop {
+                let done = downloaded.load(Ordering::Relaxed);
+                report(done, total);
+                if done >= total || failed.load(Ordering::Relaxed) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+        });
+
+        for _ in 0..DL_WORKERS {
+            scope.spawn(|| loop {
+                if failed.load(Ordering::Relaxed) {
+                    return;
+                }
+                let idx = next.fetch_add(1, Ordering::Relaxed) as u64;
+                if idx >= num_chunks {
+                    return;
+                }
+                let start = idx * DL_CHUNK;
+                let end = (start + DL_CHUNK).min(total) - 1;
+                if let Err(e) = download_chunk(client, url, &part, start, end, &downloaded) {
+                    let mut slot = first_err.lock().unwrap();
+                    if slot.is_none() {
+                        *slot = Some(e);
+                    }
+                    failed.store(true, Ordering::Relaxed);
+                    return;
+                }
+            });
+        }
+    });
+
+    if let Some(e) = first_err.into_inner().unwrap() {
+        let _ = fs::remove_file(&part);
+        return Err(format!("download failed: {e}"));
+    }
+
+    // Sum of chunk lengths equals `total` exactly, so this also catches a
+    // truncated transfer being finalized as a complete image.
+    let got = downloaded.load(Ordering::Relaxed);
+    if got != total {
+        let _ = fs::remove_file(&part);
+        return Err(format!(
+            "download incomplete: expected {total} bytes, got {got}. Please retry."
+        ));
+    }
+
+    fs::rename(&part, dest).map_err(|e| {
+        let _ = fs::remove_file(&part);
+        format!("failed to finalize download: {e}")
+    })?;
+    report(total, total);
+    Ok(())
+}
+
+/// Probe the asset size and confirm the server honours `Range`. Returns the
+/// total length parsed from the `Content-Range` of a 1-byte ranged GET, or
+/// `None` if the server replied with a full `200` (Range ignored).
+fn probe_total_with_ranges(client: &reqwest::blocking::Client, url: &str) -> Option<u64> {
+    let resp = client
+        .get(url)
+        .header(reqwest::header::RANGE, "bytes=0-0")
+        .send()
+        .ok()?
+        .error_for_status()
+        .ok()?;
+    if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+        return None;
+    }
+    // Content-Range looks like "bytes 0-0/1695617571".
+    let cr = resp.headers().get(reqwest::header::CONTENT_RANGE)?.to_str().ok()?;
+    let total = cr.rsplit('/').next()?.trim().parse::<u64>().ok()?;
+    (total > 0).then_some(total)
+}
+
+/// Download one byte range into `part` at its offset, retrying transient
+/// failures. On success, advances the shared `downloaded` counter by the chunk
+/// length (only once, so retries never inflate the total).
+fn download_chunk(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    part: &Path,
+    start: u64,
+    end: u64,
+    downloaded: &AtomicU64,
+) -> Result<(), String> {
+    let len = end - start + 1;
+    let mut attempt = 0;
     loop {
-        let n = file.read(&mut buf).map_err(|e| format!("failed to read: {e}"))?;
+        attempt += 1;
+        match try_download_chunk(client, url, part, start, end) {
+            Ok(()) => {
+                downloaded.fetch_add(len, Ordering::Relaxed);
+                return Ok(());
+            }
+            Err(e) => {
+                if attempt >= DL_CHUNK_RETRIES {
+                    return Err(e);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(300 * attempt as u64));
+            }
+        }
+    }
+}
+
+fn try_download_chunk(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    part: &Path,
+    start: u64,
+    end: u64,
+) -> Result<(), String> {
+    let mut resp = client
+        .get(url)
+        .header(reqwest::header::RANGE, format!("bytes={start}-{end}"))
+        .send()
+        .and_then(|r| r.error_for_status())
+        .map_err(|e| e.to_string())?;
+    // A 200 means the server ignored Range and is about to stream the whole
+    // file into this one chunk's offset - refuse rather than corrupt the image.
+    if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+        return Err(format!("expected 206 for range {start}-{end}, got {}", resp.status()));
+    }
+
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .open(part)
+        .map_err(|e| e.to_string())?;
+    file.seek(SeekFrom::Start(start)).map_err(|e| e.to_string())?;
+
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut written = 0u64;
+    loop {
+        let n = resp.read(&mut buf).map_err(|e| e.to_string())?;
         if n == 0 {
             break;
         }
-        hasher.update(&buf[..n]);
+        file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+        written += n as u64;
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    file.flush().map_err(|e| e.to_string())?;
+
+    let expected = end - start + 1;
+    if written != expected {
+        return Err(format!(
+            "range {start}-{end} truncated: expected {expected} bytes, got {written}"
+        ));
+    }
+    Ok(())
 }
 
 fn download_file(
@@ -389,6 +507,140 @@ mod tests {
         let len = std::fs::metadata(path).unwrap().len();
         assert!(len >= 48 * 1024 * 1024, "sim image should be ~48 MB, got {len}");
         assert!(resolved.bmap_path.is_none(), "sim image has no bmap");
+    }
+
+    use std::io::{BufRead, BufReader};
+    use std::net::TcpListener;
+
+    /// Minimal HTTP/1.1 server that honours `Range: bytes=a-b` (206 + a slice)
+    /// and serves the whole blob otherwise (200). One thread per connection so
+    /// parallel workers are served concurrently, mirroring GitHub/Azure.
+    fn spawn_range_server(data: Vec<u8>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let data = std::sync::Arc::new(data);
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let data = data.clone();
+                std::thread::spawn(move || {
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut range: Option<(u64, u64)> = None;
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        let l = line.trim_end();
+                        if l.is_empty() {
+                            break;
+                        }
+                        let lower = l.to_ascii_lowercase();
+                        if let Some(v) = lower.strip_prefix("range: bytes=") {
+                            let mut it = v.split('-');
+                            let a = it.next().and_then(|s| s.trim().parse::<u64>().ok());
+                            let b = it.next().and_then(|s| s.trim().parse::<u64>().ok());
+                            if let (Some(a), Some(b)) = (a, b) {
+                                range = Some((a, b));
+                            }
+                        }
+                    }
+                    let total = data.len() as u64;
+                    match range {
+                        Some((a, b)) => {
+                            let b = b.min(total - 1);
+                            let slice = &data[a as usize..=b as usize];
+                            let hdr = format!(
+                                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {a}-{b}/{total}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                                slice.len()
+                            );
+                            let _ = stream.write_all(hdr.as_bytes());
+                            let _ = stream.write_all(slice);
+                        }
+                        None => {
+                            let hdr = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {total}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n"
+                            );
+                            let _ = stream.write_all(hdr.as_bytes());
+                            let _ = stream.write_all(&data);
+                        }
+                    }
+                    let _ = stream.flush();
+                });
+            }
+        });
+        format!("http://{addr}/img")
+    }
+
+    fn patterned_blob(len: usize) -> Vec<u8> {
+        // Position-dependent bytes so a mis-offset chunk is detected.
+        let mut data = vec![0u8; len];
+        for (i, byte) in data.iter_mut().enumerate() {
+            *byte = (i as u64).wrapping_mul(2654435761).wrapping_shr(11) as u8;
+        }
+        data
+    }
+
+    /// Real-network check: GitHub release download URLs 302-redirect to Azure
+    /// Blob, and the parallel downloader only works if `reqwest` carries the
+    /// `Range` header across that redirect (else we'd get a full 200 per chunk).
+    /// Ignored by default so the suite stays offline; run with `--ignored`.
+    #[test]
+    #[ignore]
+    fn real_github_asset_supports_ranges_through_redirect() {
+        let url = "https://github.com/pollen-robotics/reachy-mini-os/releases/download/v0.2.7/2026-06-17-reachyminios-v0.2.7.bmap";
+        let client = reqwest::blocking::Client::builder()
+            .user_agent("reachy-mini-flasher")
+            .build()
+            .unwrap();
+        let total = probe_total_with_ranges(&client, url)
+            .expect("probe should see 206 + Content-Range through the redirect");
+        assert!(total > 0);
+
+        let dir = std::env::temp_dir().join(format!("rmf-realdl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("real.bmap");
+        let report = |_w: u64, _t: u64| {};
+        download_ranged(&client, url, &dest, total, &report).expect("real download ok");
+        assert_eq!(std::fs::metadata(&dest).unwrap().len(), total);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn probe_reports_total_and_range_support() {
+        let data = patterned_blob(3 * 1024 * 1024);
+        let expected = data.len() as u64;
+        let url = spawn_range_server(data);
+        let client = reqwest::blocking::Client::new();
+        assert_eq!(probe_total_with_ranges(&client, &url), Some(expected));
+    }
+
+    #[test]
+    fn parallel_download_reassembles_bytes_exactly() {
+        // ~40 MiB + odd tail => spans several DL_CHUNKs with a partial last one,
+        // exercising multi-worker assembly and offset correctness.
+        let expected = patterned_blob(40 * 1024 * 1024 + 12_345);
+        let total = expected.len() as u64;
+        let url = spawn_range_server(expected.clone());
+        let client = reqwest::blocking::Client::new();
+
+        let dir = std::env::temp_dir().join(format!("rmf-dltest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("out.bin");
+
+        let last_progress = AtomicU64::new(0);
+        let report = |w: u64, _t: u64| last_progress.store(w, Ordering::Relaxed);
+        download_ranged(&client, &url, &dest, total, &report).expect("download should succeed");
+
+        let got = std::fs::read(&dest).unwrap();
+        assert_eq!(got.len(), expected.len(), "downloaded size mismatch");
+        assert!(got == expected, "downloaded bytes differ from source");
+        assert_eq!(last_progress.load(Ordering::Relaxed), total, "final progress != total");
+        // The intermediate `.part` must be gone after the atomic rename.
+        assert!(!dest.with_extension("part").exists(), "leftover .part file");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
