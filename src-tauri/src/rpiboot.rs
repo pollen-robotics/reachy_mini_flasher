@@ -116,18 +116,84 @@ fn run_rpiboot(app: &AppHandle) -> Result<(), String> {
          REACHY_RPIBOOT_DIR."
             .to_string()
     })?;
+
+    // On macOS the elevated (root-via-osascript) process is a separate TCC
+    // subject that CANNOT read files under ~/Documents, ~/Desktop or ~/Downloads
+    // - so if the artifacts live in such a folder (dev checkout), rpiboot sees an
+    // empty dir ("No 'bootcode' files found") and bails. Copy them into a
+    // non-protected cache dir first, in the app's own (user) context which *can*
+    // read those folders.
+    #[cfg(target_os = "macos")]
+    let (bin, dir) = stage_artifacts_macos(app, &bin, &dir)?;
+
     run_elevated_rpiboot(&bin, &dir)
+}
+
+/// Copy the rpiboot binary and gadget dir into the app cache (outside the
+/// TCC-protected folders) so the elevated process can read them.
+#[cfg(target_os = "macos")]
+fn stage_artifacts_macos(
+    app: &AppHandle,
+    bin: &Path,
+    dir: &Path,
+) -> Result<(PathBuf, PathBuf), String> {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    let base = app
+        .path()
+        .app_cache_dir()
+        .unwrap_or_else(|_| std::env::temp_dir())
+        .join("rpiboot-stage");
+
+    // Start clean to avoid stale boot files across upgrades.
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(&base).map_err(|e| format!("failed to create staging dir: {e}"))?;
+
+    let staged_bin = base.join(bin_name());
+    fs::copy(bin, &staged_bin).map_err(|e| format!("failed to stage rpiboot binary: {e}"))?;
+    let mut perms = fs::metadata(&staged_bin)
+        .map_err(|e| format!("failed to read staged binary metadata: {e}"))?
+        .permissions();
+    perms.set_mode(0o755);
+    let _ = fs::set_permissions(&staged_bin, perms);
+
+    let dir_name = dir
+        .file_name()
+        .ok_or_else(|| "invalid gadget directory path".to_string())?;
+    let staged_dir = base.join(dir_name);
+    // `cp -RL` dereferences symlinks so the staged copy is self-contained. This
+    // runs as the app user, which can read the source even under ~/Documents.
+    let status = Command::new("cp")
+        .arg("-RL")
+        .arg(dir)
+        .arg(&base)
+        .status()
+        .map_err(|e| format!("failed to stage gadget files: {e}"))?;
+    if !status.success() {
+        return Err("failed to copy rpiboot boot files into the cache dir".to_string());
+    }
+
+    Ok((staged_bin, staged_dir))
 }
 
 #[cfg(target_os = "macos")]
 fn run_elevated_rpiboot(bin: &Path, dir: &Path) -> Result<(), String> {
     // osascript runs the command as root, so no `sudo` needed inside.
+    // `2>&1` is essential: `do shell script` only captures the inner command's
+    // stdout, so without redirecting, rpiboot's real error (on stderr) is lost
+    // and every failure looks like a vague generic error.
     let apple = format!(
-        "do shell script \"'{}' -d '{}'\" with prompt \"Reachy Mini Flasher needs administrator access to prepare your robot for flashing.\" with administrator privileges",
+        "do shell script \"'{}' -d '{}' 2>&1\" with prompt \"Reachy Mini Flasher needs administrator access to prepare your robot for flashing.\" with administrator privileges",
         bin.to_string_lossy(),
         dir.to_string_lossy()
     );
+    // Run from a non-TCC-protected directory. The elevated child shell inherits
+    // this cwd; if it's under ~/Documents, ~/Desktop or ~/Downloads (as in a dev
+    // checkout), the root shell's startup `getcwd()` is denied by TCC and the
+    // whole script dies with exit 255 before rpiboot ever runs.
     let out = Command::new("osascript")
+        .current_dir("/")
         .args(["-e", &apple])
         .output()
         .map_err(|e| format!("failed to request privileges: {e}"))?;
@@ -135,11 +201,18 @@ fn run_elevated_rpiboot(bin: &Path, dir: &Path) -> Result<(), String> {
     if out.status.success() {
         Ok(())
     } else {
-        let err = String::from_utf8_lossy(&out.stderr);
-        if err.contains("-128") {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        // Log the full output so the real cause is visible in the dev console.
+        eprintln!("rpiboot failed:\n  stdout: {}\n  stderr: {}", stdout.trim(), stderr.trim());
+        if stderr.contains("-128") {
             Err("Preparation cancelled (admin authorization denied).".to_string())
         } else {
-            Err(format!("rpiboot failed: {}", err.trim()))
+            let detail = [stderr.trim(), stdout.trim()]
+                .into_iter()
+                .find(|s| !s.is_empty())
+                .unwrap_or("no output");
+            Err(format!("rpiboot failed: {detail}"))
         }
     }
 }

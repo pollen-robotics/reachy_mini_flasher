@@ -37,6 +37,22 @@ Notes:
   (`do shell script ... with administrator privileges`) because it needs root
   to talk to the CM4 over USB, which is not a disk-access (TCC) problem.
 
+  Two macOS gotchas bit us here, both only in a **dev checkout under
+  `~/Documents`** (a TCC-protected folder). The elevated shell is a *separate*
+  TCC subject from the app, so:
+  1. Its startup `getcwd()` fails if it inherits a cwd under the protected
+     folder -> `shell-init: ... getcwd: ... Operation not permitted (255)`,
+     killing the script before rpiboot runs. Fixed by launching `osascript`
+     with `current_dir("/")`.
+  2. Even with a valid cwd, the root process **cannot read** rpiboot's boot
+     files if they live under the protected folder -> rpiboot reports
+     `No 'bootcode' files found` and prints its help. Fixed by staging the
+     binary + `mass-storage-gadget64` dir into the app cache
+     (`~/Library/Caches/...`, not TCC-protected) in the app's own user context
+     first (`stage_artifacts_macos`), then running rpiboot from there.
+
+  Neither hits a packaged app, whose resources live in the `.app` bundle.
+
 ### Option D: `authopen` (the one we ship for flashing)
 
 `/usr/libexec/authopen` is an Apple-signed setuid-root helper that opens a file
