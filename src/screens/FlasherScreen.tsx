@@ -109,7 +109,7 @@ const CONNECT_STEPS: StepItem[] = [
     Icon: PowerSettingsNewOutlined,
     desc: (
       <>
-        Make sure your Reachy is <S>switched off</S> before you start.
+        Make sure your <B>Reachy</B> is <S>switched off</S> before you start.
       </>
     ),  },
   {
@@ -117,8 +117,8 @@ const CONNECT_STEPS: StepItem[] = [
     Icon: HandymanOutlined,
     desc: (
       <>
-        Use the <B>screwdriver</B> to <S>remove the 4 head screws</S>, then{' '}
-        <S>lift the top shell</S> to reach the board.
+        Use the <B>screwdriver</B> to <S>remove</S> the <B>4 head screws</B>, then <S>lift</S>{' '}
+        the <B>top shell</B> to reach the board.
       </>
     ),  },
   {
@@ -134,7 +134,7 @@ const CONNECT_STEPS: StepItem[] = [
     Icon: UsbOutlined,
     desc: (
       <>
-        <S>Connect the cable</S> to the <B>CM4 USB port</B> inside the head, and the{' '}
+        <S>Connect</S> the <B>cable</B> to the <B>CM4 USB port</B> inside the head, and the{' '}
         <S>other end</S> to your <B>computer</B>.
       </>
     ),  },
@@ -143,7 +143,7 @@ const CONNECT_STEPS: StepItem[] = [
     Icon: PowerSettingsNewOutlined,
     desc: (
       <>
-        <S>Switch it back on</S> - after a few seconds you should hear the <B>fan spinning</B>. It
+        <S>Switch it back on</S> - after a few seconds you should hear the <S>fan spinning</S>. It
         boots in <B>download mode</B>, ready to flash.
       </>
     ),  },
@@ -937,8 +937,8 @@ function IntroBody() {
       </VisualSlot>
       <Typography sx={TITLE_SX}>Flash your Reachy Mini</Typography>
       <Typography sx={DESC_SX}>
-        This installs the latest <S>ReachyMiniOS</S> on your <S>Reachy Mini Wireless</S>{' '}
-        <S>over USB</S>. We&apos;ll walk you through connecting it, flashing, and restarting it.
+        This installs the latest <B>ReachyMiniOS</B> on your <B>Reachy Mini Wireless</B> over{' '}
+        <B>USB</B>. We&apos;ll walk you through connecting it, flashing, and restarting it.
       </Typography>
     </Stack>
   );
@@ -1065,7 +1065,7 @@ function SelectReachyBody({
       <Typography sx={{ ...DESC_SX, maxWidth: 400, minHeight: '3em' }}>
         {device ? (
           <>
-            Your Reachy is connected and <S>ready to be flashed</S> - select it below to continue.
+            Your <B>Reachy</B> is connected and <S>ready to be flashed</S> - select it below to continue.
           </>
         ) : (
           <>
@@ -1459,17 +1459,16 @@ function Footer({
         ) : null}
       </Box>
       <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
-        <Typography
-          sx={{
-            fontSize: 10,
-            letterSpacing: 0.3,
-            color: 'text.disabled',
-            opacity: 0.5,
-            userSelect: 'none',
-          }}
+        <Stack
+          direction="row"
+          spacing={0.4}
+          sx={{ alignItems: 'center', color: 'text.disabled', opacity: 0.5, userSelect: 'none' }}
         >
-          For Reachy Mini Wireless
-        </Typography>
+          <WarningAmberRounded sx={{ fontSize: 11 }} />
+          <Typography sx={{ fontSize: 10, letterSpacing: 0.3, color: 'inherit' }}>
+            For Reachy Mini Wireless only
+          </Typography>
+        </Stack>
         <Box sx={{ width: '1px', height: 10, bgcolor: 'divider' }} />
         <Typography
           component="button"

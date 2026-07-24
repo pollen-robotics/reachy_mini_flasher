@@ -843,6 +843,13 @@ export function ReachyStage({
   // antennas have been posed; until then we cover the stage with a spinner.
   const [ready, setReady] = useState(false);
   const handleReady = useCallback(() => setReady(true), []);
+  // The model decodes/poses/GPU-warms OFF-SCREEN during the intro, so `ready`
+  // (and thus the spinner fade) fires long before the stage is ever shown. That
+  // means the FIRST time the viz reveals (first wizard step) the model pops in
+  // with a possible 1-frame flicker as the render loop spins up. To mask it, we
+  // hold the loading gate a beat longer: it only lifts once the stage has been
+  // actually shown, plus a short linger, guaranteeing a settled model beneath.
+  const [revealed, setRevealed] = useState(false);
   // The switch meshes, lifted from RobotModel; a drei <Outlines> hull is portaled
   // onto each of them whenever the SW1 step is active.
   const [sw1Meshes, setSw1Meshes] = useState<Object3D[]>([]);
@@ -876,6 +883,15 @@ export function ReachyStage({
   const shown = visible && rect != null;
   const active = shown && !dev;
   const slot = rect ?? PRELOAD_RECT;
+
+  // Once the model is ready AND has actually been shown, keep the spinner up for
+  // ~1s more before lifting it - long enough for the first real frames to settle
+  // so the reveal is flicker-free. Sticky: later reveals stay uncovered.
+  useEffect(() => {
+    if (!ready || !shown || revealed) return;
+    const id = setTimeout(() => setRevealed(true), 1000);
+    return () => clearTimeout(id);
+  }, [ready, shown, revealed]);
 
   // Grow centered on the reserved slot: text layout stays untouched.
   const grownW = slot.width * (1 + STAGE_GROW);
@@ -1004,16 +1020,15 @@ export function ReachyStage({
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          opacity: ready ? 0 : 1,
+          opacity: ready && revealed ? 0 : 1,
           pointerEvents: 'none',
           // Opaque surface fill so the half-decoded / un-posed model is fully
           // hidden behind the spinner (the canvas is alpha-transparent).
           background: theme.palette.background.default,
           borderRadius: card.radius,
-          // Smoother, slower fade-out that lingers ~500ms after the model is
-          // ready before it starts dissolving.
+          // Smoother, slower fade-out once we finally lift the gate (the ~1s
+          // hold before `revealed` already provides the linger).
           transition: 'opacity 0.5s ease',
-          transitionDelay: ready ? '0.5s' : '0s',
           zIndex: 3,
         }}
       >
