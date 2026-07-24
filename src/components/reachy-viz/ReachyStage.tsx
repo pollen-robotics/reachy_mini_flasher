@@ -78,7 +78,7 @@ function poseAntenna(bone: Object3D | undefined, angle: number): void {
 // shot, once the camera settles, that connector slides from an offset
 // (unplugged) into the CM4 USB-C port along its own axis (+X / -Z, glb Y-up).
 const CABLE_OUT_DIR = new Vector3(0.707, 0, -0.707).normalize();
-const CABLE_OUT_DIST = 0.3; // travel of the connector: far enough to slide fully
+const CABLE_OUT_DIST = 0.2; // travel of the connector: far enough to slide fully
 // OUT of the tight board frame before it's hidden (and to enter from off-screen
 // when plugging in), so it never visibly pops away mid-frame.
 const CABLE_LAMBDA = 3.5; // slide ease speed (lower = slower / smoother)
@@ -159,7 +159,6 @@ function RobotModel({
   headOpen,
   screwsOut,
   sw1Download,
-  animateScrews,
   snapKey,
   dwellRef,
   onPick,
@@ -173,10 +172,6 @@ function RobotModel({
   headOpen?: boolean;
   screwsOut?: boolean;
   sw1Download?: boolean;
-  /** Only true on the screw (open/close-head) shot: there the screws play their
-   * staggered ease. On every OTHER step they SNAP to their resting target, so
-   * erratic navigation can never leave them stuck part-way out. */
-  animateScrews?: boolean;
   /** Changes when the wizard (re)starts; parts snap to their target instantly
    * instead of animating, so a fresh wizard opens in its correct state. */
   snapKey?: string;
@@ -318,10 +313,17 @@ function RobotModel({
       if (!(o as Mesh).isMesh) return;
       const key = norm(o.name);
       if (!want.has(key)) return;
-      const dir = SCREW_DIR.clone();
-      if (o.parent) dir.applyQuaternion(o.parent.getWorldQuaternion(new Quaternion()).invert());
-      dir.normalize();
-      list.push({ node: o, rest: o.position.clone(), dir, key });
+      // Idempotent pristine rest/dir (see UsbCable): if the effect re-runs while
+      // a screw is backed out, recapturing o.position would bake in the offset
+      // and the screw would drift further "out" on every re-run.
+      const ud = o.userData as { __restPos?: Vector3; __slideDir?: Vector3 };
+      if (!ud.__restPos) {
+        ud.__restPos = o.position.clone();
+        const d = SCREW_DIR.clone();
+        if (o.parent) d.applyQuaternion(o.parent.getWorldQuaternion(new Quaternion()).invert());
+        ud.__slideDir = d.normalize();
+      }
+      list.push({ node: o, rest: ud.__restPos.clone(), dir: ud.__slideDir!.clone(), key });
     });
     list.sort((a, b) => SCREW_NODE_NAMES.indexOf(a.key) - SCREW_NODE_NAMES.indexOf(b.key));
     screws.current = list;
@@ -377,12 +379,14 @@ function RobotModel({
     }
 
     // --- Head screws ---
-    // Only the screw shot plays the staggered ease (after SCREW_DELAY). On every
-    // other step the screws SNAP to their resting target, so no navigation
-    // pattern can leave them frozen part-way out. When arriving on the screw
-    // shot, screwT is already at the previous step's resting value, so it eases
-    // from the correct start (seated -> out on open, out -> seated on close).
-    if (snap || !animateScrews) screwT.current = scTgt;
+    // The screws ALWAYS ease toward their target (staggered, after SCREW_DELAY),
+    // on every step - not just the screw shot. Easing everywhere means an
+    // interrupted transition just keeps easing from wherever it was to the new
+    // target (no jump); the master clock is clamped to [0, SCREW_TOTAL] and the
+    // rest pose is pristine (see the idempotent capture above), so no navigation
+    // pattern can leave a screw stuck part-way or drifting "too far out". Only a
+    // wizard (re)start snaps them, so a freshly-shown wizard opens correctly posed.
+    if (snap) screwT.current = scTgt;
     else if (dwell >= SCREW_DELAY) {
       const d = MathUtils.clamp(scTgt - screwT.current, -step, step);
       screwT.current = MathUtils.clamp(screwT.current + d, 0, SCREW_TOTAL);
@@ -461,11 +465,23 @@ function UsbCable({
     const node = found[0] ?? null;
     plug.current = node;
     if (node) {
-      rest.current.copy(node.position);
-      const d = CABLE_OUT_DIR.clone();
-      if (node.parent)
-        d.applyQuaternion(node.parent.getWorldQuaternion(new Quaternion()).invert());
-      dir.current.copy(d.normalize());
+      // Capture the PRISTINE seated rest pose + slide axis exactly ONCE and
+      // stash them on the node (like the antennas' __restQuat). The effect can
+      // re-run (react-refresh/HMR, remounts) while useFrame has already slid the
+      // connector to its unplugged offset; recapturing node.position then would
+      // bake that offset into `rest`, so seating (t=0) would leave it 0.3 m away
+      // and off the tight board frame - i.e. the cable would never visibly
+      // "arrive". Reusing the stored pristine values keeps it idempotent.
+      const ud = node.userData as { __restPos?: Vector3; __slideDir?: Vector3 };
+      if (!ud.__restPos) {
+        ud.__restPos = node.position.clone();
+        const d = CABLE_OUT_DIR.clone();
+        if (node.parent)
+          d.applyQuaternion(node.parent.getWorldQuaternion(new Quaternion()).invert());
+        ud.__slideDir = d.normalize();
+      }
+      rest.current.copy(ud.__restPos);
+      dir.current.copy(ud.__slideDir!);
       node.visible = false;
       // Surface the connector (+ wire) meshes for the USB-step highlight.
       const meshes: Object3D[] = [];
@@ -898,7 +914,6 @@ export function ReachyStage({
             headOpen={state.headOpen}
             screwsOut={state.screwsOut}
             sw1Download={state.sw1Download}
-            animateScrews={active && !!shot.highlightScrews}
             snapKey={snapKey}
             dwellRef={dwellRef}
             onPick={dev ? setPicked : undefined}

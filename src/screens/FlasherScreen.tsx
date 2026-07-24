@@ -9,12 +9,12 @@ import DialogActions from '@mui/material/DialogActions';
 import DialogContent from '@mui/material/DialogContent';
 import DialogContentText from '@mui/material/DialogContentText';
 import DialogTitle from '@mui/material/DialogTitle';
-import LinearProgress from '@mui/material/LinearProgress';
 import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
 import { alpha, useTheme } from '@mui/material/styles';
 import type { SxProps, Theme } from '@mui/material/styles';
 import type { SvgIconComponent } from '@mui/icons-material';
+import AccessTimeRounded from '@mui/icons-material/AccessTimeRounded';
 import CheckCircleRounded from '@mui/icons-material/CheckCircleRounded';
 import ChevronLeftRounded from '@mui/icons-material/ChevronLeftRounded';
 import ChevronRightRounded from '@mui/icons-material/ChevronRightRounded';
@@ -63,6 +63,8 @@ type StepItem = {
   label: string;
   Icon: SvgIconComponent;
   desc?: ReactNode;
+  /** Optional highlighted callout rendered as a small tinted card below the desc. */
+  note?: ReactNode;
 };
 
 /** Shared outlined-tag look (grey, relatively contrasted), used by inline
@@ -187,10 +189,16 @@ const DONE_STEPS: StepItem[] = [
     Icon: PowerSettingsNewOutlined,
     desc: (
       <>
-        <S>Switch it back on</S> - it boots into the fresh <B>ReachyMiniOS</B>, back to its normal
-        state.
+        <S>Switch it back on</S> - the <B>fan</B> should spin and it boots the fresh{' '}
+        <B>ReachyMiniOS</B>.
       </>
-    ),  },
+    ),
+    note: (
+      <>
+        <S>Wait a few minutes</S> before starting the <B>Bluetooth</B> setup.
+      </>
+    ),
+  },
 ];
 
 /** Number of guided hardware instructions in the Connect wizard. */
@@ -381,14 +389,25 @@ export function FlasherScreen() {
       if (statusRef.current !== 'connect' || connectStepRef.current < CONNECT_N) return;
       try {
         const found = await detectReachy();
-        if (!active || !found) return;
+        if (!active) return;
+        // Robot no longer visible (unplugged, or dropped out of download mode
+        // mid-prep): re-arm so a fresh plug-in triggers one new attempt, and
+        // clear the "preparing" state so the UI doesn't hang on it forever.
+        if (!found) {
+          prepareStartedRef.current = false;
+          setPreparing(false);
+          return;
+        }
         if (found.mode === 'download') {
           if (!prepareStartedRef.current) {
             prepareStartedRef.current = true;
             setPreparing(true);
             prepareReachy().catch((e) => {
               if (!active) return;
-              prepareStartedRef.current = false;
+              // Do NOT re-arm here: leaving the guard set prevents re-prompting
+              // for the admin password every poll (~1.5s) while the robot stays
+              // in download mode. The user retries via the "Try again" button,
+              // or by re-plugging the robot (handled by the `!found` branch).
               setPreparing(false);
               setPrepareError(String(e));
             });
@@ -716,7 +735,7 @@ export function FlasherScreen() {
           alignItems: 'center',
           // Nudge the centered block down a touch: the top progress bar + step
           // label add visual weight up top, so pure centering reads too high.
-          pt: 7,
+          pt: 4,
           overflowY: 'auto',
           overflowX: 'hidden',
         }}
@@ -952,6 +971,29 @@ function ConnectStepBody({
           slot, so push the title down to keep clear breathing room below it. */}
       <Typography sx={{ ...TITLE_SX, mt: 3 }}>{step.label}</Typography>
       {step.desc && <Typography sx={DESC_SX}>{step.desc}</Typography>}
+      {step.note && (
+        <Stack
+          direction="row"
+          spacing={1}
+          sx={{
+            alignItems: 'center',
+            alignSelf: 'center',
+            maxWidth: 360,
+            mt: 0.5,
+            px: 1.5,
+            py: 1,
+            textAlign: 'left',
+            borderRadius: 1.5,
+            border: (t) => `1px solid ${alpha(t.palette.primary.main, 0.35)}`,
+            bgcolor: (t) => alpha(t.palette.primary.main, 0.06),
+          }}
+        >
+          <AccessTimeRounded sx={{ fontSize: 18, color: 'primary.main', flexShrink: 0 }} />
+          <Typography sx={{ fontSize: '0.8125rem', color: 'text.secondary', textAlign: 'left' }}>
+            {step.note}
+          </Typography>
+        </Stack>
+      )}
     </Stack>
   );
 }
@@ -1185,10 +1227,24 @@ function ReadyBody({ version, imageReady }: { version: string | null; imageReady
   );
 }
 
+function formatElapsed(totalSec: number): string {
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
 function FlashingBody({ progress }: { progress: FlashProgress | null }) {
   const total = progress?.total ?? 0;
   const written = progress?.written ?? 0;
   const pct = total > 0 ? Math.min(100, Math.round((written / total) * 100)) : null;
+
+  // Elapsed timer: gives a sense of progress even when the write % stalls.
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    const start = Date.now();
+    const id = setInterval(() => setElapsed(Math.floor((Date.now() - start) / 1000)), 1000);
+    return () => clearInterval(id);
+  }, []);
 
   return (
     <Stack spacing={2} sx={{ ...BODY_STACK_SX, mt: 4 }}>
@@ -1196,6 +1252,16 @@ function FlashingBody({ progress }: { progress: FlashProgress | null }) {
       <Box sx={{ width: '100%', maxWidth: 420 }}>
         <FlashProgressBar pct={pct} />
       </Box>
+      <Stack
+        direction="row"
+        spacing={0.75}
+        sx={{ alignItems: 'center', justifyContent: 'center', color: 'text.secondary' }}
+      >
+        <AccessTimeRounded sx={{ fontSize: 15 }} />
+        <Typography sx={{ fontSize: '0.8125rem', fontVariantNumeric: 'tabular-nums' }}>
+          {formatElapsed(elapsed)} - this usually takes <S>a few minutes</S>
+        </Typography>
+      </Stack>
       <Typography sx={{ fontSize: '0.8125rem', color: 'text.secondary' }}>
         Keep your Reachy <S>plugged in</S> - don&apos;t power it off
       </Typography>
@@ -1460,9 +1526,7 @@ function VisualSlot({ children, sx }: { children: ReactNode; sx?: SxProps<Theme>
  * sub-steps) just moves this one value. */
 function StepBar({ value }: { value: number }) {
   return (
-    <LinearProgress
-      variant="determinate"
-      value={value}
+    <Box
       sx={{
         position: 'fixed',
         top: 0,
@@ -1471,8 +1535,21 @@ function StepBar({ value }: { value: number }) {
         height: 3,
         zIndex: 1300,
         pointerEvents: 'none',
+        // Neutral track so the orange fill reads crisply as progress (matches
+        // the mobile app's edge-to-edge bar), instead of MUI's washed-out
+        // lightened-primary track.
+        bgcolor: (theme) => alpha(theme.palette.text.primary, 0.08),
       }}
-    />
+    >
+      <Box
+        sx={{
+          height: '100%',
+          width: `${value}%`,
+          bgcolor: 'primary.main',
+          transition: 'width 400ms cubic-bezier(0.4, 0, 0.2, 1)',
+        }}
+      />
+    </Box>
   );
 }
 
@@ -1580,7 +1657,23 @@ function humanizeError(raw: string): { title: string; message: string } {
   if (/authorization was denied|denied|-128/.test(e)) {
     return {
       title: 'Authorization denied',
-      message: 'Admin access is needed to write to the robot. Try again and approve the prompt.',
+      message: 'Admin access is needed to prepare the robot. Try again and approve the prompt.',
+    };
+  }
+  // rpiboot (USB preparation) failures must be checked BEFORE the generic
+  // disk-access branch: rpiboot talks to the CM4 over USB, so its errors are
+  // not a Full Disk Access / TCC problem and must not be mislabeled as one.
+  if (e.includes('rpiboot')) {
+    if (e.includes('not found')) {
+      return {
+        title: 'Preparation tool missing',
+        message: "rpiboot isn't installed on this machine (see scripts/fetch-rpiboot.sh).",
+      };
+    }
+    return {
+      title: "Couldn't prepare the robot",
+      message:
+        'Failed to expose the CM4 storage over USB. Unplug and re-plug the USB cable (switch on DOWNLOAD), then try again.',
     };
   }
   if (/operation not permitted|permission|full disk/.test(e)) {
