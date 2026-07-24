@@ -56,7 +56,22 @@ fn cache_dir() -> PathBuf {
 /// Version reported in simulation mode (no real OS is written).
 const SIM_OS_VERSION: &str = "1.8.4";
 
+/// What the latest GitHub release ships: version tag + the image asset (and an
+/// optional `.bmap`). Used both to decide whether the cache is fresh and to
+/// download when it isn't.
+struct ReleaseInfo {
+    version: String,
+    img_name: String,
+    img_url: String,
+    bmap: Option<(String, String)>,
+}
+
 /// Find the ISO, downloading it if needed. Emits `downloading` progress.
+///
+/// The cache is version-aware: we ask GitHub what the latest release ships and
+/// only reuse the cache when it already holds *that* exact asset. An older image
+/// left over from a previous run is refreshed. If GitHub is unreachable we fall
+/// back to whatever image is cached so an offline flash still works.
 pub fn resolve_image(app: &AppHandle) -> Result<ResolvedImage, String> {
     if sim::enabled() {
         emit_download(app, SIM_OS_VERSION, 0, 0);
@@ -66,39 +81,41 @@ pub fn resolve_image(app: &AppHandle) -> Result<ResolvedImage, String> {
     let dir = cache_dir();
     fs::create_dir_all(&dir).map_err(|e| format!("failed to create cache dir: {e}"))?;
 
-    if let Some(found) = newest_local_image(&dir)? {
-        // The image is already cached, so no download happens - but the UI still
-        // wants the version. Surface it from the latest release (best-effort).
-        emit_download(app, &cached_os_version(), 0, 0);
-        return Ok(found);
-    }
-
-    download_latest_release(app, &dir)
-}
-
-/// Best-effort OS version when flashing from cache: the latest release tag,
-/// falling back to "latest" when offline.
-fn cached_os_version() -> String {
-    fetch_release_tag().unwrap_or_else(|| "latest".to_string())
-}
-
-/// Quick fetch of the current release tag from the GitHub releases API.
-fn fetch_release_tag() -> Option<String> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("reachy-mini-flasher")
-        .timeout(std::time::Duration::from_secs(5))
         .build()
-        .ok()?;
-    let body = client
-        .get(RELEASES_API)
-        .send()
-        .ok()?
-        .error_for_status()
-        .ok()?
-        .text()
-        .ok()?;
-    let json: serde_json::Value = serde_json::from_str(&body).ok()?;
-    json.get("tag_name").and_then(|v| v.as_str()).map(|s| s.to_string())
+        .map_err(|e| e.to_string())?;
+
+    match fetch_latest_release(&client) {
+        Ok(rel) => {
+            let image_path = dir.join(&rel.img_name);
+            if image_path.exists() {
+                // Cache already holds exactly the latest asset - no download.
+                emit_download(app, &rel.version, 0, 0);
+                return Ok(ResolvedImage {
+                    image_path: image_path.to_string_lossy().to_string(),
+                    bmap_path: find_bmap(&dir),
+                });
+            }
+            // Empty cache or a stale (older) version: fetch the new image, then
+            // drop the old ones so we don't keep several ~1.7 GB files around.
+            emit_download(app, &rel.version, 0, 0);
+            let resolved = download_release(app, &client, &dir, &rel)?;
+            let keep: Vec<&str> = std::iter::once(rel.img_name.as_str())
+                .chain(rel.bmap.as_ref().map(|(n, _)| n.as_str()))
+                .collect();
+            remove_stale_files(&dir, &keep);
+            Ok(resolved)
+        }
+        Err(net_err) => {
+            // Offline / GitHub unreachable: reuse a cached image if we have one.
+            if let Some(found) = newest_local_image(&dir)? {
+                emit_download(app, "latest", 0, 0);
+                return Ok(found);
+            }
+            Err(format!("could not fetch latest release (and no local image found): {net_err}"))
+        }
+    }
 }
 
 fn is_image_name(name: &str) -> bool {
@@ -175,17 +192,15 @@ fn find_bmap(dir: &Path) -> Option<String> {
         .map(|p| p.to_string_lossy().to_string())
 }
 
-fn download_latest_release(app: &AppHandle, dir: &Path) -> Result<ResolvedImage, String> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("reachy-mini-flasher")
-        .build()
-        .map_err(|e| e.to_string())?;
-
+/// Query the GitHub releases API and pick the image (+ bmap) asset from the
+/// latest release. Network/parse failures bubble up so the caller can fall back
+/// to the cache.
+fn fetch_latest_release(client: &reqwest::blocking::Client) -> Result<ReleaseInfo, String> {
     let body = client
         .get(RELEASES_API)
         .send()
         .and_then(|r| r.error_for_status())
-        .map_err(|e| format!("could not fetch latest release (and no local image found): {e}"))?
+        .map_err(|e| e.to_string())?
         .text()
         .map_err(|e| e.to_string())?;
 
@@ -195,8 +210,6 @@ fn download_latest_release(app: &AppHandle, dir: &Path) -> Result<ResolvedImage,
         .and_then(|v| v.as_str())
         .unwrap_or("latest")
         .to_string();
-    // Surface the version immediately, before the (large) download starts.
-    emit_download(app, &version, 0, 0);
     let assets = json.get("assets").and_then(|a| a.as_array()).cloned().unwrap_or_default();
 
     let find = |pred: &dyn Fn(&str) -> bool| -> Option<(String, String)> {
@@ -212,14 +225,27 @@ fn download_latest_release(app: &AppHandle, dir: &Path) -> Result<ResolvedImage,
         .or_else(|| find(&|n| n.to_lowercase().ends_with(".img")))
         .ok_or_else(|| "no image asset (.img.gz/.zip/.img) found in the latest release".to_string())?;
 
-    let image_path = dir.join(&img_name);
-    download_parallel(app, &client, &img_url, &image_path, &version)?;
+    Ok(ReleaseInfo {
+        version,
+        img_name,
+        img_url,
+        bmap: find(&|n| n.to_lowercase().ends_with(".bmap")),
+    })
+}
 
-    let bmap_path = if let Some((bmap_name, bmap_url)) =
-        find(&|n| n.to_lowercase().ends_with(".bmap"))
-    {
-        let p = dir.join(&bmap_name);
-        download_file(app, &client, &bmap_url, &p, &version, false)?;
+/// Download the image (and bmap) described by `rel` into `dir`.
+fn download_release(
+    app: &AppHandle,
+    client: &reqwest::blocking::Client,
+    dir: &Path,
+    rel: &ReleaseInfo,
+) -> Result<ResolvedImage, String> {
+    let image_path = dir.join(&rel.img_name);
+    download_parallel(app, client, &rel.img_url, &image_path, &rel.version)?;
+
+    let bmap_path = if let Some((bmap_name, bmap_url)) = &rel.bmap {
+        let p = dir.join(bmap_name);
+        download_file(app, client, bmap_url, &p, &rel.version, false)?;
         Some(p.to_string_lossy().to_string())
     } else {
         None
@@ -229,6 +255,24 @@ fn download_latest_release(app: &AppHandle, dir: &Path) -> Result<ResolvedImage,
         image_path: image_path.to_string_lossy().to_string(),
         bmap_path,
     })
+}
+
+/// Delete cached image/bmap/part files not in `keep` (e.g. an older OS version
+/// left over after refreshing to a newer release), so the cache holds exactly
+/// the current release's assets.
+fn remove_stale_files(dir: &Path, keep: &[&str]) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if keep.contains(&name) {
+            continue;
+        }
+        let is_bmap = name.to_lowercase().ends_with(".bmap");
+        if is_image_name(name) || is_bmap || name.ends_with(".part") {
+            let _ = fs::remove_file(&path);
+        }
+    }
 }
 
 /// Download `url` to `dest` over several parallel ranged connections.

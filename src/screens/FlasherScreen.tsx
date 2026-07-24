@@ -27,6 +27,7 @@ import WarningAmberRounded from '@mui/icons-material/WarningAmberRounded';
 
 import reachyImg from '@/assets/reachy-builder.svg';
 import reachyAvatarImg from '@/assets/reachy.svg';
+import lockedReachyImg from '@/assets/locked-reachy.svg';
 import { ReachyStage } from '@/components/reachy-viz/ReachyStage';
 import {
   ASSEMBLED,
@@ -51,6 +52,7 @@ const TROUBLESHOOTING_URL = 'https://huggingface.co/docs/reachy_mini/troubleshoo
 
 type Status =
   | 'intro'
+  | 'download'
   | 'connect'
   | 'found'
   | 'ready'
@@ -73,7 +75,7 @@ const TAG_BORDER = (t: Theme) => `1px solid ${alpha(t.palette.text.primary, 0.3)
 
 /** Inline keyword tag: highlights the important term of a step as a soft pill.
  * `boxDecorationBreak: clone` keeps the pill clean if it wraps across lines. */
-function B({ children }: { children: ReactNode }) {
+function Tag({ children }: { children: ReactNode }) {
   return (
     <Box
       component="span"
@@ -94,8 +96,8 @@ function B({ children }: { children: ReactNode }) {
   );
 }
 
-/** Inline bold emphasis for secondary important words (no pill). */
-function S({ children }: { children: ReactNode }) {
+/** Inline bold emphasis for important words (no pill). */
+function B({ children }: { children: ReactNode }) {
   return (
     <Box component="span" sx={{ fontWeight: 700, color: 'text.primary' }}>
       {children}
@@ -109,7 +111,7 @@ const CONNECT_STEPS: StepItem[] = [
     Icon: PowerSettingsNewOutlined,
     desc: (
       <>
-        Make sure your <B>Reachy</B> is <S>switched off</S> before you start.
+        Make sure your <Tag>Reachy</Tag> is <B>switched off</B> before you start.
       </>
     ),  },
   {
@@ -117,8 +119,8 @@ const CONNECT_STEPS: StepItem[] = [
     Icon: HandymanOutlined,
     desc: (
       <>
-        Use the <B>screwdriver</B> to <S>remove</S> the <B>4 head screws</B>, then <S>lift</S>{' '}
-        the <B>top shell</B> to reach the board.
+        Use the <Tag>screwdriver</Tag> to <B>remove</B> the <Tag>4 head screws</Tag>, then <B>lift</B>{' '}
+        the <Tag>top shell</Tag> to reach the board.
       </>
     ),  },
   {
@@ -126,7 +128,7 @@ const CONNECT_STEPS: StepItem[] = [
     Icon: ToggleOnOutlined,
     desc: (
       <>
-        Find the small <B>SW1</B> switch and <S>push it toward</S> the <B>DOWNLOAD</B> label.
+        Find the small <Tag>SW1</Tag> switch and <B>push it toward</B> the <Tag>DOWNLOAD</Tag> label.
       </>
     ),  },
   {
@@ -134,8 +136,8 @@ const CONNECT_STEPS: StepItem[] = [
     Icon: UsbOutlined,
     desc: (
       <>
-        <S>Connect</S> the <B>cable</B> to the <B>CM4 USB port</B> inside the head, and the{' '}
-        <S>other end</S> to your <B>computer</B>.
+        <B>Connect</B> the <Tag>cable</Tag> to the <Tag>CM4 USB port</Tag> inside the head, and the{' '}
+        <B>other end</B> to your <Tag>computer</Tag>.
       </>
     ),  },
   {
@@ -143,8 +145,8 @@ const CONNECT_STEPS: StepItem[] = [
     Icon: PowerSettingsNewOutlined,
     desc: (
       <>
-        <S>Switch it back on</S> - after a few seconds you should hear the <S>fan spinning</S>. It
-        boots in <B>download mode</B>, ready to flash.
+        <B>Switch it back on</B> - after a few seconds you should hear the <B>fan spinning</B>. It
+        boots in <Tag>download mode</Tag>, ready to flash.
       </>
     ),  },
 ];
@@ -155,7 +157,7 @@ const DONE_STEPS: StepItem[] = [
     Icon: PowerSettingsNewOutlined,
     desc: (
       <>
-        <S>Turn your Reachy off</S> now that the new system has been written.
+        <B>Turn your Reachy off</B> now that the new system has been written.
       </>
     ),  },
   {
@@ -163,7 +165,7 @@ const DONE_STEPS: StepItem[] = [
     Icon: ToggleOffOutlined,
     desc: (
       <>
-        <S>Move</S> the <B>SW1</B> switch back from <B>DOWNLOAD</B> to its <B>DEBUG</B> position.
+        <B>Move</B> the <Tag>SW1</Tag> switch back from <Tag>DOWNLOAD</Tag> to its <Tag>DEBUG</Tag> position.
       </>
     ),  },
   {
@@ -171,8 +173,8 @@ const DONE_STEPS: StepItem[] = [
     Icon: UsbOutlined,
     desc: (
       <>
-        <S>Disconnect the USB cable</S> from the <B>CM4 port</B> inside the head and from your{' '}
-        <B>computer</B>.
+        <B>Disconnect the USB cable</B> from the <Tag>CM4 port</Tag> inside the head and from your{' '}
+        <Tag>computer</Tag>.
       </>
     ),  },
   {
@@ -180,8 +182,8 @@ const DONE_STEPS: StepItem[] = [
     Icon: HandymanOutlined,
     desc: (
       <>
-        <S>Put the top shell back</S> and <S>screw the 4 head screws back in</S> with the{' '}
-        <B>screwdriver</B>.
+        <B>Put the top shell back</B> and <B>screw the 4 head screws back in</B> with the{' '}
+        <Tag>screwdriver</Tag>.
       </>
     ),  },
   {
@@ -189,20 +191,30 @@ const DONE_STEPS: StepItem[] = [
     Icon: PowerSettingsNewOutlined,
     desc: (
       <>
-        <S>Switch it back on</S> - the <B>fan</B> should spin and it boots the fresh{' '}
-        <B>ReachyMiniOS</B>.
+        <B>Switch it back on</B> - the <Tag>fan</Tag> should spin and it boots the fresh{' '}
+        <Tag>ReachyMiniOS</Tag>.
       </>
     ),
     note: (
       <>
-        <S>Wait a few minutes</S> before starting the <B>Bluetooth</B> setup.
+        <B>Wait a few minutes</B> before starting the <Tag>Bluetooth</Tag> setup.
       </>
     ),
   },
 ];
 
-/** Number of guided hardware instructions in the Connect wizard. */
+/** Number of guided hardware instructions in the Connect wizard (each has a 3D
+ * viz). Steps 0..CONNECT_N-1 are these instructions. */
 const CONNECT_N = CONNECT_STEPS.length;
+
+/** Dedicated "heads-up about the macOS system prompts" screen, shown right after
+ * the hardware steps and before we start looking for the robot (the prompts fire
+ * during detection). No viz. */
+const CONNECT_WARN = CONNECT_N;
+
+/** Waiting / "select your Reachy" screen - the last position of the Connect
+ * wizard, where detection runs. */
+const CONNECT_WAIT = CONNECT_N + 1;
 
 /** Number of guided restart instructions after a successful flash. */
 const DONE_N = DONE_STEPS.length;
@@ -220,28 +232,31 @@ function journeyValue(
   doneStep: number,
   flashPct: number | null,
 ): number {
-  const doneBase = CONNECT_N + 6;
+  const doneBase = CONNECT_WAIT + 7;
   const denom = doneBase + DONE_N; // index of the final ("finished") position
   let idx: number;
   switch (status) {
     case 'intro':
       idx = 0;
       break;
+    case 'download':
+      idx = 1;
+      break;
     case 'connect':
-      idx = 1 + Math.min(connectStep, CONNECT_N); // 1..N+1 (N = waiting)
+      idx = 2 + Math.min(connectStep, CONNECT_WAIT); // 2..WAIT+2 (WAIT = waiting)
       break;
     case 'found':
-      idx = CONNECT_N + 2;
+      idx = CONNECT_WAIT + 3;
       break;
     case 'ready':
-      idx = CONNECT_N + 3;
+      idx = CONNECT_WAIT + 4;
       break;
     case 'flashing':
     case 'error':
-      idx = CONNECT_N + 4 + (status === 'flashing' && flashPct != null ? flashPct / 100 : 0);
+      idx = CONNECT_WAIT + 5 + (status === 'flashing' && flashPct != null ? flashPct / 100 : 0);
       break;
     case 'flashed':
-      idx = CONNECT_N + 5;
+      idx = CONNECT_WAIT + 6;
       break;
     case 'done':
       idx = doneBase + Math.min(doneStep, DONE_N);
@@ -390,7 +405,7 @@ export function FlasherScreen() {
     const tick = async () => {
       // Only look for the robot once the user has walked the wizard and reached
       // the waiting screen - not while they're still reading the instructions.
-      if (statusRef.current !== 'connect' || connectStepRef.current < CONNECT_N) return;
+      if (statusRef.current !== 'connect' || connectStepRef.current < CONNECT_WAIT) return;
       try {
         const found = await detectReachy();
         if (!active) return;
@@ -444,7 +459,7 @@ export function FlasherScreen() {
 
   // If we've been on the waiting screen for a while with nothing detected,
   // surface a "board might be dead" hint + troubleshooting link.
-  const waiting = status === 'connect' && connectStep >= CONNECT_N && !device && !preparing;
+  const waiting = status === 'connect' && connectStep >= CONNECT_WAIT && !device && !preparing;
   useEffect(() => {
     if (!waiting) {
       setWaitTimedOut(false);
@@ -499,7 +514,15 @@ export function FlasherScreen() {
   }, []);
 
   // Leave the intro and enter the connect wizard at its first step.
+  // "Get started" from the welcome screen -> the blocking download step.
   const startFlow = useCallback(() => {
+    setConnectStep(0);
+    setStatus('download');
+  }, []);
+
+  // Leave the download step for the first connect instruction (enabled once the
+  // image is ready).
+  const startConnect = useCallback(() => {
     setConnectStep(0);
     setStatus('connect');
   }, []);
@@ -507,7 +530,7 @@ export function FlasherScreen() {
   // Connect wizard navigation (shared by live + dev). Clamped to [0, CONNECT_N];
   // reaching CONNECT_N is the "waiting for the robot" screen.
   const connectNext = useCallback(() => {
-    setConnectStep((s) => Math.min(s + 1, CONNECT_N));
+    setConnectStep((s) => Math.min(s + 1, CONNECT_WAIT));
   }, []);
   const connectBack = useCallback(() => {
     setPrepareError(null);
@@ -542,6 +565,9 @@ export function FlasherScreen() {
     const w = imageProgress?.written ?? 0;
     return t > 0 ? Math.min(100, Math.round((w / t) * 100)) : null;
   })();
+  // No bytes yet: we're still resolving the release / connecting to the CDN, so
+  // the % would sit at 0. Surface a "connecting" state instead until data flows.
+  const downloadStarted = (imageProgress?.written ?? 0) > 0;
 
   const effStatus = status;
   const effConnectStep = connectStep;
@@ -555,6 +581,7 @@ export function FlasherScreen() {
   const effError = error ?? 'Something went wrong';
   const effDownloading = !imageReady && !imageError;
   const effDownloadPct = downloadPct;
+  const effDownloadStarted = downloadStarted;
   const effImageError = imageError;
 
   const onSelect = handleSelect;
@@ -580,23 +607,33 @@ export function FlasherScreen() {
   let primaryAction: BarAction | null = null;
   if (effStatus === 'intro') {
     primaryAction = { label: 'Get started', onClick: startFlow };
+  } else if (effStatus === 'download') {
+    // Blocking step 1: Next unlocks only once the image finished downloading.
+    // On error the primary becomes Retry (actions always live in the bar).
+    backAction = { label: 'Back', onClick: () => setStatus('intro') };
+    primaryAction = effImageError
+      ? { label: 'Retry', onClick: startPrefetch }
+      : { label: 'Next', onClick: startConnect, disabled: !effImageReady };
   } else if (effStatus === 'connect') {
-    if (effConnectStep >= CONNECT_N) {
+    if (effConnectStep >= CONNECT_WAIT) {
       backAction = { label: 'Back', onClick: onBack };
       // Still searching: Next is present but disabled until a robot is picked.
       primaryAction = effPrepareError
         ? { label: 'Try again', onClick: retryPrepare }
         : { label: 'Next', onClick: onSelect, disabled: true };
+    } else if (effConnectStep === CONNECT_WARN) {
+      // Dedicated heads-up screen: Back to the last instruction, continue to the
+      // waiting/detection screen (where the system prompts fire).
+      backAction = { label: 'Back', onClick: onBack };
+      primaryAction = { label: "I'm ready", onClick: onNext };
     } else {
-      // First step steps back to the intro (continuous back navigation).
+      // First connect step steps back to the download step (its immediate
+      // predecessor), not all the way to the intro - continuous back navigation.
       backAction = {
         label: 'Back',
-        onClick: effConnectStep === 0 ? () => setStatus('intro') : onBack,
+        onClick: effConnectStep === 0 ? () => setStatus('download') : onBack,
       };
-      primaryAction = {
-        label: effConnectStep === CONNECT_N - 1 ? "I'm ready" : 'Next',
-        onClick: onNext,
-      };
+      primaryAction = { label: 'Next', onClick: onNext };
     }
   } else if (effStatus === 'found') {
     backAction = { label: 'Back', onClick: backToLastInstruction };
@@ -647,8 +684,14 @@ export function FlasherScreen() {
     switch (effStatus) {
       case 'intro':
         return 'Overview';
+      case 'download':
+        return 'Get the OS';
       case 'connect':
-        return effConnectStep < CONNECT_N ? CONNECT_STEPS[effConnectStep].label : 'Find your Reachy';
+        return effConnectStep < CONNECT_N
+          ? CONNECT_STEPS[effConnectStep].label
+          : effConnectStep === CONNECT_WARN
+            ? 'Before you continue'
+            : 'Find your Reachy';
       case 'found':
         return 'Find your Reachy';
       case 'ready':
@@ -666,7 +709,7 @@ export function FlasherScreen() {
 
   // Identity of the current screen, used to key the enter/exit content animation.
   const viewKey =
-    (effStatus === 'connect' && effConnectStep >= CONNECT_N) || effStatus === 'found'
+    (effStatus === 'connect' && effConnectStep >= CONNECT_WAIT) || effStatus === 'found'
       ? 'select'
       : effStatus === 'connect'
         ? `connect-${effConnectStep}`
@@ -777,6 +820,16 @@ export function FlasherScreen() {
           >
             {effStatus === 'intro' ? (
               <IntroBody />
+            ) : effStatus === 'download' ? (
+              <DownloadBody
+                downloading={effDownloading}
+                started={effDownloadStarted}
+                pct={effDownloadPct}
+                written={imageProgress?.written ?? 0}
+                total={imageProgress?.total ?? 0}
+                version={effVersion}
+                error={effImageError}
+              />
             ) : effStatus === 'found' ? (
               <SelectReachyBody
                 device={effDevice}
@@ -787,7 +840,7 @@ export function FlasherScreen() {
                 timedOut={false}
               />
             ) : effStatus === 'connect' ? (
-              effConnectStep >= CONNECT_N ? (
+              effConnectStep >= CONNECT_WAIT ? (
                 <SelectReachyBody
                   device={null}
                   selected={false}
@@ -796,6 +849,8 @@ export function FlasherScreen() {
                   prepareError={effPrepareError}
                   timedOut={waitTimedOut}
                 />
+              ) : effConnectStep === CONNECT_WARN ? (
+                <SystemPromptsBody />
               ) : (
                 <ConnectStepBody step={CONNECT_STEPS[effConnectStep]} mediaRef={registerMedia} />
               )
@@ -834,11 +889,13 @@ export function FlasherScreen() {
 
       <ActionBar back={backAction} primary={primaryAction} />
 
+      {/* Download progress lives in the blocking intro step now, so the footer
+          only carries branding + troubleshooting (no duplicate indicator). */}
       <Footer
-        downloading={effDownloading}
+        downloading={false}
         version={effVersion ?? osVersion}
-        pct={effDownloadPct}
-        error={effImageError}
+        pct={null}
+        error={null}
         onRetry={startPrefetch}
       />
 
@@ -886,8 +943,8 @@ function FlashConfirmDialog({
       <DialogTitle sx={{ fontWeight: 700, fontSize: '1.5rem' }}>Flash ReachyMiniOS?</DialogTitle>
       <DialogContent>
         <DialogContentText sx={{ color: 'text.secondary', fontSize: '1.0625rem' }}>
-          This installs {version ? <B>version {version}</B> : 'the latest version'}. Keep your
-          Reachy <S>plugged in</S> until it finishes.
+          This installs {version ? <Tag>version {version}</Tag> : 'the latest version'}. Keep your
+          Reachy <B>plugged in</B> until it finishes.
         </DialogContentText>
         <Box
           sx={{
@@ -911,6 +968,12 @@ function FlashConfirmDialog({
             on your Reachy - it can&apos;t be undone.
           </Typography>
         </Box>
+        <Typography
+          sx={{ mt: 1.5, fontSize: '0.8125rem', color: 'text.secondary', textAlign: 'left', lineHeight: 1.5 }}
+        >
+          macOS will ask for your <B>administrator password</B> once more to write to the disk -
+          that&apos;s expected.
+        </Typography>
       </DialogContent>
       <DialogActions sx={{ px: 3, pb: 2 }}>
         <Button onClick={onCancel} color="inherit" sx={{ borderRadius: 1 }}>
@@ -933,7 +996,8 @@ function FlashConfirmDialog({
 // Bodies
 // ---------------------------------------------------------------------------
 
-/** Opening screen: explains, in one glance, what the whole flow will do. */
+/** Opening screen: a proper welcome that explains, in one glance, what the whole
+ * flow will do. Navigation lives in the shared bottom ActionBar. */
 function IntroBody() {
   return (
     <Stack spacing={2} sx={{ ...BODY_STACK_SX, mt: -6 }}>
@@ -947,8 +1011,90 @@ function IntroBody() {
       </VisualSlot>
       <Typography sx={TITLE_SX}>Flash your Reachy Mini</Typography>
       <Typography sx={DESC_SX}>
-        This installs the latest <B>ReachyMiniOS</B> on your <B>Reachy Mini Wireless</B> over{' '}
-        <B>USB</B>. We&apos;ll walk you through connecting it, flashing, and restarting it.
+        This installs the latest <Tag>ReachyMiniOS</Tag> on your <Tag>Reachy Mini Wireless</Tag> over{' '}
+        <Tag>USB</Tag>. We&apos;ll walk you through connecting it, flashing, and restarting it.
+      </Typography>
+    </Stack>
+  );
+}
+
+/** Step 1: fetch the OS image up front (blocking) so the flash later is instant.
+ * Shown with the same progress bar as the flash view, and the same success mark
+ * as the "done" screen once ready. All actions (Retry / Next) live in the shared
+ * ActionBar, matching the rest of the app - nothing floats in the body. */
+function DownloadBody({
+  downloading,
+  started,
+  pct,
+  written,
+  total,
+  version,
+  error,
+}: {
+  downloading: boolean;
+  started: boolean;
+  pct: number | null;
+  written: number;
+  total: number;
+  version: string | null;
+  error: string | null;
+}) {
+  if (error) {
+    return (
+      <Stack spacing={1.75} sx={BODY_STACK_SX}>
+        <Typography sx={TITLE_SX}>Download failed</Typography>
+        <Typography sx={DESC_SX}>
+          Couldn&apos;t download <Tag>ReachyMiniOS</Tag>. Check your internet connection, then try
+          again.
+        </Typography>
+      </Stack>
+    );
+  }
+  if (downloading) {
+    // Before the first byte, keep the bar indeterminate and say we're connecting
+    // - otherwise it would sit at a frozen 0% while the CDN is resolved.
+    return (
+      <Stack spacing={2} sx={BODY_STACK_SX}>
+        <Typography sx={TITLE_SX}>Downloading ReachyMiniOS</Typography>
+        <Box sx={{ width: '100%', maxWidth: 420 }}>
+          <FlashProgressBar
+            pct={started ? pct : null}
+            note={started && total > 0 ? `${formatBytes(written)} / ${formatBytes(total)}` : undefined}
+          />
+        </Box>
+        <Typography sx={{ fontSize: '0.9375rem', color: 'text.secondary', textAlign: 'center' }}>
+          {started ? (
+            version ? (
+              <>
+                Fetching <Tag>{version}</Tag>
+              </>
+            ) : (
+              'Downloading the OS image'
+            )
+          ) : (
+            <>Connecting to the server{'\u2026'}</>
+          )}
+          <br />
+          this one-time download prepares the OS to flash.
+        </Typography>
+      </Stack>
+    );
+  }
+  // Ready: image fully downloaded. Same composition (title + desc) as the
+  // downloading state so the content stays vertically aligned across states.
+  return (
+    <Stack spacing={1.75} sx={BODY_STACK_SX}>
+      <Typography sx={TITLE_SX}>ReachyMiniOS ready</Typography>
+      <Typography sx={DESC_SX}>
+        {version ? (
+          <>
+            <Tag>{version}</Tag> is <B>downloaded</B> and <B>ready to flash</B>.
+          </>
+        ) : (
+          <>
+            The OS image is <B>downloaded</B> and <B>ready to flash</B>.
+          </>
+        )}
       </Typography>
     </Stack>
   );
@@ -1038,6 +1184,30 @@ function MediaFrame({
   );
 }
 
+/** Dedicated heads-up screen: as detection runs, macOS shows security prompts
+ * (asking for your password and permission to access the device). Announcing
+ * them here - on their own screen - keeps the waiting screen uncluttered (it
+ * only owns the "board might be dead" hint). */
+function SystemPromptsBody() {
+  return (
+    <Stack spacing={1.75} sx={BODY_STACK_SX}>
+      <VisualSlot>
+        <Box
+          component="img"
+          src={lockedReachyImg}
+          alt="Locked Reachy"
+          sx={{ height: '100%', width: 'auto', objectFit: 'contain' }}
+        />
+      </VisualSlot>
+      <Typography sx={TITLE_SX}>macOS will ask for permission</Typography>
+      <Typography sx={DESC_SX}>
+        While we look for your Reachy, macOS will show <B>security prompts</B> - for your{' '}
+        <B>password</B> and to <B>access the device</B>. Accept them to continue.
+      </Typography>
+    </Stack>
+  );
+}
+
 /**
  * Live device picker (final Connect screen + detected state, merged). While we
  * poll, the list shows a searching placeholder; once a Reachy enumerates it
@@ -1075,12 +1245,12 @@ function SelectReachyBody({
       <Typography sx={{ ...DESC_SX, maxWidth: 400, minHeight: '3em' }}>
         {device ? (
           <>
-            Your <B>Reachy</B> is connected and <S>ready to be flashed</S> - select it below to continue.
+            Your <Tag>Reachy</Tag> is connected and <B>ready to be flashed</B> - select it below to continue.
           </>
         ) : (
           <>
-            Make sure it&apos;s <S>powered on</S>, in <B>DOWNLOAD</B> mode, and connected over{' '}
-            <B>USB</B>.
+            Make sure it&apos;s <B>powered on</B>, in <Tag>DOWNLOAD</Tag> mode, and connected over{' '}
+            <Tag>USB</Tag>.
           </>
         )}
       </Typography>
@@ -1192,7 +1362,7 @@ function SelectReachyBody({
         <Typography
           sx={{ fontSize: '0.8125rem', color: 'text.secondary', maxWidth: 360, mx: 'auto' }}
         >
-          Still nothing? Double-check every step above. The <S>fan</S> is a good tell - if it
+          Still nothing? Double-check every step above. The <B>fan</B> is a good tell - if it
           isn&apos;t spinning, the board may be dead.{' '}
           <Typography
             component="button"
@@ -1243,6 +1413,15 @@ function formatElapsed(totalSec: number): string {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
+/** Human-readable byte size, e.g. 1234567 -> "1.2 GB". Uses one decimal for
+ * GB/MB so the download figure reads cleanly next to the percentage. */
+function formatBytes(bytes: number): string {
+  if (!bytes || bytes <= 0) return '0 MB';
+  const mb = bytes / 1_000_000;
+  if (mb >= 1000) return `${(mb / 1000).toFixed(1)} GB`;
+  return `${mb.toFixed(mb >= 100 ? 0 : 1)} MB`;
+}
+
 function FlashingBody({ progress }: { progress: FlashProgress | null }) {
   const total = progress?.total ?? 0;
   const written = progress?.written ?? 0;
@@ -1264,17 +1443,34 @@ function FlashingBody({ progress }: { progress: FlashProgress | null }) {
       </Box>
       <Stack
         direction="row"
+        spacing={1}
+        sx={{
+          alignItems: 'center',
+          alignSelf: 'center',
+          maxWidth: 360,
+          px: 1.5,
+          py: 1,
+          textAlign: 'left',
+          borderRadius: 1.5,
+          border: (t) => `1px solid ${alpha(t.palette.primary.main, 0.35)}`,
+          bgcolor: (t) => alpha(t.palette.primary.main, 0.06),
+        }}
+      >
+        <WarningAmberRounded sx={{ fontSize: 18, color: 'primary.main', flexShrink: 0 }} />
+        <Typography sx={{ fontSize: '0.8125rem', color: 'text.secondary', textAlign: 'left' }}>
+          <B>Important:</B> keep your Reachy <B>plugged in</B> - don&apos;t power it off
+        </Typography>
+      </Stack>
+      <Stack
+        direction="row"
         spacing={0.75}
         sx={{ alignItems: 'center', justifyContent: 'center', color: 'text.secondary' }}
       >
         <AccessTimeRounded sx={{ fontSize: 15 }} />
         <Typography sx={{ fontSize: '0.8125rem', fontVariantNumeric: 'tabular-nums' }}>
-          {formatElapsed(elapsed)} - this usually takes <S>a few minutes</S>
+          {formatElapsed(elapsed)} - this usually takes <B>a few minutes</B>
         </Typography>
       </Stack>
-      <Typography sx={{ fontSize: '0.8125rem', color: 'text.secondary' }}>
-        Keep your Reachy <S>plugged in</S> - don&apos;t power it off
-      </Typography>
     </Stack>
   );
 }
@@ -1286,8 +1482,8 @@ function FlashedBody() {
     <Stack spacing={1.75} sx={BODY_STACK_SX}>
       <Typography sx={TITLE_SX}>Flash complete!</Typography>
       <Typography sx={DESC_SX}>
-        <B>ReachyMiniOS</B> was written successfully. In the next steps, we&apos;ll guide you
-        through putting your Reachy back to its <S>normal state</S>.
+        <Tag>ReachyMiniOS</Tag> was written successfully. In the next steps, we&apos;ll guide you
+        through putting your Reachy back to its <B>normal state</B>.
       </Typography>
     </Stack>
   );
@@ -1319,8 +1515,8 @@ function DoneBody() {
       </VisualSlot>
       <Typography sx={TITLE_SX}>You&apos;re all set!</Typography>
       <Typography sx={DESC_SX}>
-        Your Reachy is back to its <S>normal state</S> and running the fresh{' '}
-        <B>ReachyMiniOS</B>. You can flash another one whenever you like.
+        Your Reachy is back to its <B>normal state</B> and running the fresh{' '}
+        <Tag>ReachyMiniOS</Tag>. You can flash another one whenever you like.
       </Typography>
     </Stack>
   );
@@ -1563,7 +1759,7 @@ function StepBar({ value }: { value: number }) {
 }
 
 /** Rounded progress bar with the % centered inside and a light moving shimmer. */
-function FlashProgressBar({ pct }: { pct: number | null }) {
+function FlashProgressBar({ pct, note }: { pct: number | null; note?: string }) {
   const theme = useTheme();
   const primary = theme.palette.primary.main;
   const indeterminate = pct === null;
@@ -1572,6 +1768,13 @@ function FlashProgressBar({ pct }: { pct: number | null }) {
   const overFill = !indeterminate && value >= 54;
 
   const fillGradient = `linear-gradient(90deg, ${alpha(primary, 0.88)}, ${primary})`;
+  // Indeterminate ("Preparing…"/"Connecting…") is a passive wait, not real
+  // progress: use a soft, low-saturation sweep so it reads as "working" without
+  // the aggressive full-orange streak.
+  const sweepGradient = `linear-gradient(90deg, ${alpha(primary, 0)}, ${alpha(
+    primary,
+    0.35,
+  )}, ${alpha(primary, 0)})`;
 
   return (
     <Box
@@ -1593,26 +1796,30 @@ function FlashProgressBar({ pct }: { pct: number | null }) {
               position: 'absolute',
               top: 0,
               bottom: 0,
-              width: '38%',
+              width: '55%',
               borderRadius: 999,
-              background: fillGradient,
+              background: sweepGradient,
             }}
-            animate={{ left: ['-40%', '102%'] }}
-            transition={{ duration: 1.2, repeat: Infinity, ease: 'easeInOut' }}
+            animate={{ left: ['-55%', '105%'] }}
+            transition={{ duration: 2.1, repeat: Infinity, ease: 'easeInOut' }}
           />
         ) : (
-          <motion.div
-            style={{
+          // Plain CSS fill (no framer-motion): a freshly-mounted element does not
+          // run its CSS transition on first paint, so switching in from the
+          // indeterminate sweep is instant - no slide-in from 0. Subsequent %
+          // updates use a short linear transition (no spring overshoot/momentum,
+          // which is what made the bar look like it was "moving").
+          <Box
+            sx={{
               position: 'absolute',
               top: 0,
               bottom: 0,
               left: 0,
+              width: `${value}%`,
               borderRadius: 999,
               background: fillGradient,
-              overflow: 'hidden',
+              transition: 'width 0.15s linear',
             }}
-            animate={{ width: `${value}%` }}
-            transition={{ type: 'spring', stiffness: 120, damping: 20 }}
           />
         )}
       </Box>
@@ -1636,7 +1843,7 @@ function FlashProgressBar({ pct }: { pct: number | null }) {
             transition: 'color .2s ease',
           }}
         >
-          {indeterminate ? 'Preparing\u2026' : `${value}%`}
+          {indeterminate ? 'Preparing\u2026' : `${value}%${note ? ` \u00b7 ${note}` : ''}`}
         </Typography>
       </Box>
     </Box>

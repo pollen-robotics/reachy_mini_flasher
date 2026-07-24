@@ -1,7 +1,7 @@
 {
   "name": "reachy_mini_flasher",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "description": "Cross-platform (Windows/macOS) Tauri app to reflash the ReachyMiniOS image over USB",
   "engines": {
@@ -17,7 +17,10 @@
     "tauri:build": "tauri build",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src",
-    "format": "prettier --write src"
+    "format": "prettier --write src",
+    "reset:os": "rm -rf \"$HOME/Library/Application Support/reachy-mini-flasher/images\"",
+    "reset:perms": "tccutil reset All com.pollen-robotics.reachy-mini-flasher",
+    "reset": "npm run reset:os && npm run reset:perms"
   },
   "dependencies": {
     "@emotion/react": "^11.14.0",
