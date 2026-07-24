@@ -323,6 +323,10 @@ export function FlasherScreen() {
   const [preparing, setPreparing] = useState(false);
   const [prepareError, setPrepareError] = useState<string | null>(null);
   const prepareStartedRef = useRef(false);
+  // Consecutive "no device" polls. rpiboot makes the CM4 drop off the bus and
+  // re-enumerate (boot -> mass-storage), so a single missed poll is expected
+  // mid-prepare; only a sustained absence means the robot was really unplugged.
+  const missCountRef = useRef(0);
 
   // After a while without any device, hint that the board might be dead.
   const [waitTimedOut, setWaitTimedOut] = useState(false);
@@ -390,14 +394,20 @@ export function FlasherScreen() {
       try {
         const found = await detectReachy();
         if (!active) return;
-        // Robot no longer visible (unplugged, or dropped out of download mode
-        // mid-prep): re-arm so a fresh plug-in triggers one new attempt, and
-        // clear the "preparing" state so the UI doesn't hang on it forever.
+        // Robot no longer visible. This happens transiently WHILE rpiboot runs
+        // (the CM4 reboots from usbboot into the mass-storage gadget), so a single
+        // miss must NOT re-arm rpiboot - otherwise the app re-prompts for the
+        // admin password each time the device blips off the bus. Only treat a
+        // SUSTAINED absence (a few consecutive misses) as a real unplug.
         if (!found) {
-          prepareStartedRef.current = false;
-          setPreparing(false);
+          missCountRef.current += 1;
+          if (missCountRef.current >= 4) {
+            prepareStartedRef.current = false;
+            setPreparing(false);
+          }
           return;
         }
+        missCountRef.current = 0;
         if (found.mode === 'download') {
           if (!prepareStartedRef.current) {
             prepareStartedRef.current = true;
