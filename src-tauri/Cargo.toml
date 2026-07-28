@@ -1,6 +1,6 @@
 [package]
 name = "reachy-mini-flasher"
-version = "0.2.2"
+version = "0.2.3"
 description = "Cross-platform tool to reflash ReachyMiniOS over USB and update the daemon over WiFi"
 authors = ["Reachy Mini Contributors"]
 edition = "2021"
