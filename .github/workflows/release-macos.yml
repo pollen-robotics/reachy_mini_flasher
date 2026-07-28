@@ -66,6 +66,12 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # --- Updater signing (minisign) --------------------------------------
+          # Signs the bundle + generates `latest.json` so the in-app self-update
+          # (tauri-plugin-updater) can verify and install new versions. The
+          # matching public key lives in `tauri.conf.json > plugins.updater`.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           # --- Code signing + notarization: intentionally DISABLED -------------
           # We do NOT reference any APPLE_* secret here on purpose: the
           # pollen-robotics org exposes APPLE_* secrets (for the mobile app) that

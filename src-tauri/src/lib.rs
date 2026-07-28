@@ -1,9 +1,12 @@
+mod app_update;
 mod detect;
 mod disks;
 mod flash;
 mod images;
 mod rpiboot;
 mod sim;
+
+use app_update::AppUpdateStore;
 
 pub use flash::run_flash_worker;
 
@@ -32,13 +35,26 @@ fn open_url(url: String) -> Result<(), String> {
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(AppUpdateStore::new())
         .invoke_handler(tauri::generate_handler![
             detect::detect_reachy,
             rpiboot::prepare_reachy,
             images::prefetch_image,
             flash::flash_reachy,
-            open_url
+            open_url,
+            app_update::get_app_update_info,
+            app_update::install_app_update
         ])
+        .setup(|app| {
+            // Self-update check, release builds only (a debug build has no
+            // signed bundle to update to, and the endpoint 404s before the
+            // first release). Fail-open: handled inside `start_update_check`.
+            #[cfg(not(debug_assertions))]
+            app_update::start_update_check(app.handle().clone());
+            let _ = app;
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running Reachy Mini Flasher");
 }

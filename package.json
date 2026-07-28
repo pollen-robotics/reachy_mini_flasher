@@ -1,7 +1,7 @@
 {
   "name": "reachy_mini_flasher",
   "private": true,
-  "version": "0.2.1",
+  "version": "0.2.2",
   "type": "module",
   "description": "Cross-platform (Windows/macOS) Tauri app to reflash the ReachyMiniOS image over USB",
   "engines": {

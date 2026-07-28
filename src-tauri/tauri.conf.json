@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Reachy Mini Flasher",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "identifier": "com.pollen-robotics.reachy-mini-flasher",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -28,9 +28,20 @@
       "csp": null
     }
   },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "endpoints": [
+        "https://github.com/pollen-robotics/reachy_mini_flasher/releases/latest/download/latest.json"
+      ],
+      "dialog": false,
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVBNTY3OTRDOTAyOEQ1NDgKUldSSTFTaVFUSGxXV2pGdll5V3c5VHY4cERyUnlONGM2NHRNNDgzdkNMOTRmOGl3c0szU08yb0EK"
+    }
+  },
   "bundle": {
     "active": true,
     "targets": ["app", "dmg", "msi", "nsis"],
+    "createUpdaterArtifacts": true,
     "resources": {
       "binaries/rpiboot": "rpiboot"
     },

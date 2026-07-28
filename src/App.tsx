@@ -6,6 +6,7 @@ import { ThemeProvider } from '@mui/material/styles';
 import { darkTheme, lightTheme } from './theme';
 import { FlasherScreen } from './screens/FlasherScreen';
 import { TitleBar } from './components/TitleBar';
+import { UpdateOverlay } from './components/UpdateOverlay';
 
 export function App() {
   const prefersDark = useMediaQuery('(prefers-color-scheme: dark)');
@@ -16,6 +17,7 @@ export function App() {
       <CssBaseline />
       <TitleBar />
       <FlasherScreen />
+      <UpdateOverlay />
     </ThemeProvider>
   );
 }
