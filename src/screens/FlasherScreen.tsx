@@ -28,6 +28,7 @@ import WarningAmberRounded from '@mui/icons-material/WarningAmberRounded';
 import reachyImg from '@/assets/reachy-builder.svg';
 import reachyAvatarImg from '@/assets/reachy.svg';
 import lockedReachyImg from '@/assets/locked-reachy.svg';
+import { version as APP_VERSION } from '../../package.json';
 import { ReachyStage } from '@/components/reachy-viz/ReachyStage';
 import {
   ASSEMBLED,
@@ -1693,6 +1694,18 @@ function Footer({
           }}
         >
           Troubleshooting ↗
+        </Typography>
+        <Box sx={{ width: '1px', height: 10, bgcolor: 'divider' }} />
+        <Typography
+          sx={{
+            fontSize: 10,
+            letterSpacing: 0.3,
+            color: 'text.disabled',
+            opacity: 0.5,
+            userSelect: 'none',
+          }}
+        >
+          v{APP_VERSION}
         </Typography>
       </Stack>
     </Stack>
