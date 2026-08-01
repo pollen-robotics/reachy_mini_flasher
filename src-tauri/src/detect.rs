@@ -62,7 +62,10 @@ fn looks_like_reachy_disk(description: &str) -> bool {
 }
 
 fn in_download_mode() -> bool {
-    match nusb::list_devices() {
+    // nusb 0.2 returns a `MaybeFuture`; resolve it synchronously with `.wait()`
+    // since detection runs on a blocking Tauri command.
+    use nusb::MaybeFuture;
+    match nusb::list_devices().wait() {
         Ok(devices) => devices.into_iter().any(|d| d.vendor_id() == BROADCOM_VID),
         Err(_) => false,
     }

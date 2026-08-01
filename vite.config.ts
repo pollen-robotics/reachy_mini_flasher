@@ -32,7 +32,8 @@ export default defineConfig({
   // Produce a build compatible with the webviews Tauri targets.
   build: {
     target: ['es2021', 'chrome100', 'safari15'],
-    minify: !process.env.TAURI_DEBUG ? 'esbuild' : false,
+    // Vite 8 (rolldown) no longer bundles esbuild; use its oxc minifier.
+    minify: !process.env.TAURI_DEBUG ? 'oxc' : false,
     sourcemap: !!process.env.TAURI_DEBUG,
   },
 });
