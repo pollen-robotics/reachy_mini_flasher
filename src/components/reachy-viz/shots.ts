@@ -31,6 +31,8 @@ export type Shot = {
   highlightSw1?: boolean;
   /** Draw the transient primary outline highlight on the head screws this shot. */
   highlightScrews?: boolean;
+  /** Draw the transient primary outline highlight on the front head shell this shot. */
+  highlightHead?: boolean;
   /** Draw the transient primary outline highlight on the USB connector + wire. */
   highlightCable?: boolean;
   /** World-space position (glb frame) of an animated 3D marker rendered in the
@@ -61,6 +63,7 @@ export const SHOTS: Record<ShotId, Shot> = {
     target: [0, 0.52, 0.03],
     fov: 36,
     highlightScrews: true,
+    highlightHead: true,
   },
   // Looking into the head from the front-above (front shell + eyes lifted) at
   // the inner board around SW1.

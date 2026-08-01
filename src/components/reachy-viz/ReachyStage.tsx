@@ -81,7 +81,8 @@ const CABLE_OUT_DIR = new Vector3(0.707, 0, -0.707).normalize();
 const CABLE_OUT_DIST = 0.2; // travel of the connector: far enough to slide fully
 // OUT of the tight board frame before it's hidden (and to enter from off-screen
 // when plugging in), so it never visibly pops away mid-frame.
-const CABLE_LAMBDA = 3.5; // slide ease speed (lower = slower / smoother)
+const CABLE_LAMBDA = 3.5; // slide ease speed when PLUGGING IN (lower = slower / smoother)
+const CABLE_UNPLUG_LAMBDA = 2.0; // slower ease when UNPLUGGING (out) so the pull-out reads gentler
 
 // SW1 slide switch "toggle": the actuator is modelled in the DEBUG position
 // (rest). Once the camera settles on the SW1 shot we slide it ONCE to DOWNLOAD
@@ -100,9 +101,13 @@ const SW1_LAMBDA = 14; // higher = more direct/snappy lerp toward the target
 const SW1_OUTLINE_COLOR = 0xff9500; // theme primary (see theme.ts ACCENT)
 const SW1_OUTLINE_PX = 6; // switch outline thickness in SCREEN PIXELS (crisp, zoom-independent)
 const SCREW_OUTLINE_PX = 4; // screw outline thickness (smaller parts -> thinner line)
-const HL_IN = 1.0; // s after the step starts before the highlight fades IN
-const HL_OUT = 4.5; // s after the step starts when the highlight has faded OUT
-const HL_FADE = 0.4; // s of fade in / fade out
+// Step highlights appear a short, FIXED beat after the step becomes active (not
+// tied to when the part moves), hold for the rest of the step, then fade out as
+// soon as we leave the step (the camera flies to the next shot / the highlight
+// deactivates). The opacity is eased, so both edges - and the "solid" gate that
+// waits out a fading target (see meshesSolid) - fade instead of popping.
+const HL_ENTRY = 0.4; // s after the step becomes active before the highlight fades IN
+const HL_FADE_LAMBDA = 7; // opacity ease speed (~0.4 s fade in on entry / out on step change)
 
 // Head-shell screws: on the open-head shot they back out STRAIGHT BACKWARD
 // (glb world +Z, which is the shell's rear-face normal so they slide cleanly
@@ -126,6 +131,18 @@ function easeOutCubic(t: number): number {
   const x = 1 - t;
   return 1 - x * x * x;
 }
+
+// Front-face head shell: opening the head is split across TWO steps, and the
+// SLIDE (translation) is deliberately decoupled from the FADE (opacity):
+//   - On the SCREW step, once the 4 screws have backed out the whole front unit
+//     SLIDES FORWARD (glb world -Z, the front-face normal) and STAYS visible, so
+//     the lift reads at full amplitude (nothing fades mid-move).
+//   - Only when animating to the NEXT step does it FADE OUT.
+// The two are driven by independent progresses (slide tied to `screwsOut`, fade
+// tied to `headOpen`), so the close wizard reverses both for free: the shell
+// fades back in, then slides home.
+const FHEAD_WORLD_DIR = new Vector3(0, 0, -1); // forward (front-face normal); screws back out +Z
+const FHEAD_THROW = 0.4; // world units the shell slides forward
 
 /** Returns the material name(s) of a mesh (materials survive the rig, so we can
  * hide the eyes by their shared `Glass_Eyes` material rather than by object
@@ -165,6 +182,7 @@ function RobotModel({
   onReady,
   onSw1Meshes,
   onScrewMeshes,
+  onFheadMeshes,
 }: {
   hiddenParts?: string[];
   /** Target part states (see PartState). Each part eases toward its target after
@@ -180,6 +198,7 @@ function RobotModel({
   onReady?: () => void;
   onSw1Meshes?: (objs: Object3D[]) => void;
   onScrewMeshes?: (objs: Object3D[]) => void;
+  onFheadMeshes?: (objs: Object3D[]) => void;
 }) {
   const { scene } = useGLTF(glbUrl, DRACO_PATH);
   const invalidate = useThree((s) => s.invalidate);
@@ -195,8 +214,13 @@ function RobotModel({
   // the current applied alpha (1 = fully shown), `fheadApplied` the last written.
   const fheadMeshes = useRef<Object3D[]>([]);
   const fheadMats = useRef<Material[]>([]);
-  const fheadOpacity = useRef(1);
-  const fheadApplied = useRef(-1);
+  // Top-most fhead nodes (parent is NOT fhead) with their pristine rest position
+  // and forward slide direction, so the whole unit translates together without
+  // compounding on nested meshes.
+  const fheadRoots = useRef<{ node: Object3D; rest: Vector3; dir: Vector3 }[]>([]);
+  const fheadFade = useRef(0); // opacity progress: 0 = fully shown, 1 = gone (tied to headOpen)
+  const fheadSlide = useRef(0); // slide progress: 0 = home, 1 = slid forward (tied to screwsOut)
+  const fheadApplied = useRef(-1); // last-written opacity
 
   // Point the two flexible antennas straight down (they rest pointing up) by
   // driving the rig from JS - the glb stays an untouched rest-pose export, we
@@ -272,7 +296,34 @@ function RobotModel({
     });
     fheadMeshes.current = meshes;
     fheadMats.current = [...mats];
-  }, [scene]);
+
+    // Capture the top-most fhead nodes (a node whose parent is NOT fhead) so we
+    // slide the whole unit as one. Rest/dir are pristine + idempotent (like the
+    // screws): re-running the effect while the shell is slid out must not bake
+    // the offset into the rest pose.
+    const roots: { node: Object3D; rest: Vector3; dir: Vector3 }[] = [];
+    scene.traverse((o) => {
+      if (!isFrontHead(o)) return;
+      if (o.parent && isFrontHead(o.parent)) return; // keep only the top-most tagged node
+      const ud = o.userData as { __fheadRest?: Vector3; __fheadDir?: Vector3 };
+      if (!ud.__fheadRest) {
+        ud.__fheadRest = o.position.clone();
+        const d = FHEAD_WORLD_DIR.clone();
+        // Express the world-space forward direction in the node's PARENT-local
+        // frame, so bone/group-parented nodes still slide forward in world space.
+        if (o.parent) d.applyQuaternion(o.parent.getWorldQuaternion(new Quaternion()).invert());
+        ud.__fheadDir = d.normalize();
+      }
+      roots.push({ node: o, rest: ud.__fheadRest.clone(), dir: ud.__fheadDir!.clone() });
+    });
+    fheadRoots.current = roots;
+
+    // Surface the SHELL meshes (front cover only, not the eyes/cameras/board) so
+    // the open/close-head step can outline-highlight it. Fall back to the whole
+    // front unit if the shell isn't separately named.
+    const shell = meshes.filter((m) => norm(m.name).includes('shell'));
+    onFheadMeshes?.(shell.length ? shell : meshes);
+  }, [scene, onFheadMeshes]);
 
   // Group the SW1 switch body (tagged `sw1`) under one pivot so we can slide it.
   useEffect(() => {
@@ -344,20 +395,24 @@ function RobotModel({
     if (snap) snapRef.current = snapKey;
 
     // Targets (glb-space values) for each part.
-    const opTgt = headOpen ? 0 : 1; // front-head opacity (0 = open/removed)
+    const fadeTgt = headOpen ? 1 : 0; // front-head opacity progress (1 = gone)
+    const slideTgt = screwsOut ? 1 : 0; // front-head slide progress (1 = slid forward)
     const swTgt = sw1Download ? 1 : 0; // switch slide
     const scTgt = screwsOut ? SCREW_TOTAL : 0; // screw clock
 
-    // --- Front-face head: fade opacity toward target after FHEAD_DELAY ---
-    if (snap) fheadOpacity.current = opTgt;
-    else if (dwell >= FHEAD_DELAY && fheadOpacity.current !== opTgt) {
-      let op = fheadOpacity.current + (opTgt - fheadOpacity.current) * (1 - Math.exp(-FHEAD_LAMBDA * step));
-      if (Math.abs(opTgt - op) < 0.01) op = opTgt;
-      fheadOpacity.current = op;
+    // --- Front head FADE (opacity) - tied to headOpen ---
+    // Only the *fade* follows headOpen, and headOpen only flips on the step AFTER
+    // the screws come out. So within the screw step the shell stays fully opaque
+    // (it just slides, below); it dissolves only as we animate to the next step.
+    if (snap) fheadFade.current = fadeTgt;
+    else if (dwell >= FHEAD_DELAY && fheadFade.current !== fadeTgt) {
+      let f = fheadFade.current + (fadeTgt - fheadFade.current) * (1 - Math.exp(-FHEAD_LAMBDA * step));
+      if (Math.abs(fadeTgt - f) < 0.001) f = fadeTgt;
+      fheadFade.current = f;
       invalidate();
     }
-    if (fheadApplied.current !== fheadOpacity.current) {
-      const op = fheadOpacity.current;
+    const op = 1 - fheadFade.current;
+    if (fheadApplied.current !== op) {
       const opaque = op >= 0.999;
       for (const mat of fheadMats.current) {
         mat.opacity = op;
@@ -367,6 +422,27 @@ function RobotModel({
       }
       for (const m of fheadMeshes.current) m.visible = op > 0.001;
       fheadApplied.current = op;
+    }
+
+    // --- Front head SLIDE (translation) - tied to screwsOut, after the screws ---
+    // Delayed past the screws' unscrew window so, within one step, the shell first
+    // unscrews then visibly lifts forward - shown at full amplitude since the fade
+    // is deferred to the next step. On close (screwsOut -> false) it slides home,
+    // after the shell has faded back in.
+    if (snap) fheadSlide.current = slideTgt;
+    else if (dwell >= FHEAD_SLIDE_DELAY && fheadSlide.current !== slideTgt) {
+      let s =
+        fheadSlide.current + (slideTgt - fheadSlide.current) * (1 - Math.exp(-FHEAD_SLIDE_LAMBDA * step));
+      if (Math.abs(slideTgt - s) < 0.001) s = slideTgt;
+      fheadSlide.current = s;
+      invalidate();
+    }
+    {
+      const off = fheadSlide.current * FHEAD_THROW;
+      const roots = fheadRoots.current;
+      for (let i = 0; i < roots.length; i++) {
+        roots[i].node.position.copy(roots[i].rest).addScaledVector(roots[i].dir, off);
+      }
     }
 
     // --- SW1 switch: slide toward target after SW1_DELAY ---
@@ -496,9 +572,11 @@ function UsbCable({
   useFrame((_, dt) => {
     const node = plug.current;
     if (!node) return;
-    const a = 1 - Math.exp(-CABLE_LAMBDA * Math.min(dt, 0.1));
-    const past = (dwellRef?.current ?? 0) >= CABLE_DELAY;
     const tgt = plugged ? 0 : 1; // 0 = seated, 1 = unplugged (out)
+    // Unplugging (moving toward the out pose) eases slower than plugging in.
+    const lambda = tgt === 1 ? CABLE_UNPLUG_LAMBDA : CABLE_LAMBDA;
+    const a = 1 - Math.exp(-lambda * Math.min(dt, 0.1));
+    const past = (dwellRef?.current ?? 0) >= CABLE_DELAY;
     if (snapRef.current !== snapKey) {
       snapRef.current = snapKey;
       t.current = tgt; // jump to target on a wizard (re)start
@@ -518,42 +596,62 @@ function UsbCable({
 // Transient outline highlight (switch, screws)
 // --------------------------------------------------------------------------
 
+/** True only when every target mesh is (still) solid enough to occlude its own
+ * inverted-hull outline. The rim look relies on the object WRITING DEPTH so the
+ * back-side hull is occluded except at the silhouette; a mesh mid-fade
+ * (transparent with depthWrite off - e.g. the head shell fading back in on the
+ * close step) occludes nothing, so the hull renders as a filled silhouette over
+ * the whole object. Keying on `depthWrite` (not an opacity threshold) matches
+ * that occlusion exactly, with no in-between window where the blob flashes. */
+function meshesSolid(objs: Object3D[]): boolean {
+  for (const o of objs) {
+    const mat = (o as Mesh).material as Material | Material[] | undefined;
+    const mats = Array.isArray(mat) ? mat : mat ? [mat] : [];
+    for (const m of mats) {
+      if (m.transparent && !m.depthWrite) return false;
+    }
+  }
+  return true;
+}
+
 /** Portals a drei <Outlines> (crisp inverted-hull) onto each target mesh and
- * fades it IN/OUT over a time window within the step: nothing before HL_IN,
- * ramp up over HL_FADE, hold, then ramp down so it is gone by HL_OUT. Driven by
- * the shared dwell timer; opacity is throttled into state so only this small
- * subtree re-renders (not the whole stage). */
+ * eases its opacity with a uniform, step-relative rule (see HL_ENTRY):
+ *   - fades IN a fixed beat after the step becomes active (HL_ENTRY),
+ *   - holds for the rest of the step,
+ *   - fades OUT as soon as the step deactivates (we fly to the next shot).
+ * A target that can't yet occlude its own hull (mid-fade; see meshesSolid) keeps
+ * the outline suppressed until it turns solid - and because the SAME eased
+ * opacity drives that, it fades in smoothly then too. Opacity is throttled into
+ * state so only this small subtree re-renders (not the whole stage). */
 function StepHighlight({
   meshes,
   active,
   dwellRef,
   thickness,
-  inAt = HL_IN,
+  entryAt = HL_ENTRY,
 }: {
   meshes: Object3D[];
   active: boolean;
   dwellRef: { current: number };
   thickness: number;
-  /** Seconds after the step starts before the highlight fades IN. Defaults to
-   * HL_IN; pass a smaller value to align it with a part that animates earlier. */
-  inAt?: number;
+  /** Seconds after the step becomes active before the highlight fades IN. */
+  entryAt?: number;
 }) {
   const [op, setOp] = useState(0);
-  const opRef = useRef(0);
-  useFrame(() => {
-    let target = 0;
-    if (active) {
-      const t = dwellRef.current;
-      if (t <= inAt || t >= HL_OUT) target = 0;
-      else if (t < inAt + HL_FADE) target = (t - inAt) / HL_FADE;
-      else if (t > HL_OUT - HL_FADE) target = (HL_OUT - t) / HL_FADE;
-      else target = 1;
-    }
-    target = Math.max(0, Math.min(1, target));
+  const easedRef = useRef(0); // continuous eased opacity (drives the fade both ways)
+  const emittedRef = useRef(0); // last value pushed to state (throttle)
+  useFrame((_, dt) => {
+    // Shown once we're a beat into the step AND the target is solid enough to
+    // occlude its hull; cleared instantly when the step deactivates. The ease
+    // below turns each of these edges into a fade, never a pop.
+    const shown = active && dwellRef.current >= entryAt && meshesSolid(meshes);
+    const target = shown ? 1 : 0;
+    easedRef.current += (target - easedRef.current) * (1 - Math.exp(-HL_FADE_LAMBDA * Math.min(dt, 0.1)));
+    const v = easedRef.current < 0.003 ? 0 : Math.min(1, easedRef.current);
     // Throttle: only re-render when the change is visible.
-    if (Math.abs(target - opRef.current) > 0.03 || (target === 0 && opRef.current !== 0)) {
-      opRef.current = target;
-      setOp(target);
+    if (Math.abs(v - emittedRef.current) > 0.02 || (v === 0 && emittedRef.current !== 0)) {
+      emittedRef.current = v;
+      setOp(v);
     }
   });
   // Keep the outline hulls MOUNTED at all times (invisible at opacity 0) rather
@@ -607,6 +705,12 @@ const SCREW_DELAY = 0.45; // s before the screws back out
 // already moving in (and reappears late when leaving) - in BOTH directions.
 const FHEAD_DELAY = 0.45; // s before the front head starts fading in/out
 const FHEAD_LAMBDA = 6; // fade speed (higher = quicker cross-fade)
+// The shell SLIDE is decoupled from the fade (see FHEAD_WORLD_DIR). It kicks in
+// while the LAST screws are still backing out so the lift reads as a tight
+// continuation of the unscrew stagger (not a separate beat), then holds while the
+// head is "open" and slides home on close.
+const FHEAD_SLIDE_DELAY = SCREW_DELAY + SCREW_TOTAL * 0.55; // s before the shell lifts (overlaps the screws)
+const FHEAD_SLIDE_LAMBDA = 6; // slide speed (ease-out toward the slid/home pose)
 
 // Seconds for the camera to fly between two shots. The move is a deterministic
 // parametric tween (ease-in-out) between the captured start pose and the shot,
@@ -858,6 +962,10 @@ export function ReachyStage({
   // open-head (screw) step.
   const [screwMeshes, setScrewMeshes] = useState<Object3D[]>([]);
   const handleScrewMeshes = useCallback((objs: Object3D[]) => setScrewMeshes(objs), []);
+  // Front head-shell meshes, lifted from RobotModel, outlined by <StepHighlight>
+  // on the open/close-head step (the shell is the part being lifted/replaced).
+  const [fheadMeshes, setFheadMeshes] = useState<Object3D[]>([]);
+  const handleFheadMeshes = useCallback((objs: Object3D[]) => setFheadMeshes(objs), []);
   // USB connector (+ wire) meshes, lifted from UsbCable, outlined on the USB step.
   const [cableMeshes, setCableMeshes] = useState<Object3D[]>([]);
   const handleCableMeshes = useCallback((objs: Object3D[]) => setCableMeshes(objs), []);
@@ -936,6 +1044,7 @@ export function ReachyStage({
             onReady={handleReady}
             onSw1Meshes={handleSw1Meshes}
             onScrewMeshes={handleScrewMeshes}
+            onFheadMeshes={handleFheadMeshes}
           />
           {/* Render EVERY object once (incl. off-screen / occluded ones) to force
            * all geometry buffers, textures and shaders onto the GPU up front, so
@@ -967,21 +1076,24 @@ export function ReachyStage({
           active={active && !!shot.highlightSw1}
           dwellRef={dwellRef}
           thickness={SW1_OUTLINE_PX}
-          inAt={SW1_DELAY}
         />
         <StepHighlight
           meshes={screwMeshes}
           active={active && !!shot.highlightScrews}
           dwellRef={dwellRef}
           thickness={SCREW_OUTLINE_PX}
-          inAt={SCREW_DELAY}
+        />
+        <StepHighlight
+          meshes={fheadMeshes}
+          active={active && !!shot.highlightHead}
+          dwellRef={dwellRef}
+          thickness={SW1_OUTLINE_PX}
         />
         <StepHighlight
           meshes={cableMeshes}
           active={active && !!shot.highlightCable}
           dwellRef={dwellRef}
           thickness={SW1_OUTLINE_PX}
-          inAt={CABLE_DELAY}
         />
 
         {dev && (
