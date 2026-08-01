@@ -539,6 +539,26 @@ fn download_file(
     Ok(())
 }
 
+fn resolve_sim_image() -> Result<ResolvedImage, String> {
+    let dir = sim::dir();
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let image = dir.join("sim-image.img");
+
+    // Generate a ~48 MB image once, with a recognizable pattern.
+    if !image.exists() {
+        let mut file = fs::File::create(&image).map_err(|e| e.to_string())?;
+        let chunk = vec![0xA5u8; 1024 * 1024];
+        for _ in 0..48 {
+            file.write_all(&chunk).map_err(|e| e.to_string())?;
+        }
+    }
+
+    Ok(ResolvedImage {
+        image_path: image.to_string_lossy().to_string(),
+        bmap_path: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -686,24 +706,4 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
-}
-
-fn resolve_sim_image() -> Result<ResolvedImage, String> {
-    let dir = sim::dir();
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let image = dir.join("sim-image.img");
-
-    // Generate a ~48 MB image once, with a recognizable pattern.
-    if !image.exists() {
-        let mut file = fs::File::create(&image).map_err(|e| e.to_string())?;
-        let chunk = vec![0xA5u8; 1024 * 1024];
-        for _ in 0..48 {
-            file.write_all(&chunk).map_err(|e| e.to_string())?;
-        }
-    }
-
-    Ok(ResolvedImage {
-        image_path: image.to_string_lossy().to_string(),
-        bmap_path: None,
-    })
 }

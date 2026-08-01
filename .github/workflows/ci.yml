@@ -1,0 +1,63 @@
+name: CI
+
+# Fast checks run on every push to `main` and on every pull request, so a
+# regression is caught at commit time rather than at release time. The heavier
+# signed .dmg build lives in `release-macos.yml` (tags only).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend (typecheck + build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install JS dependencies
+        run: npm ci
+
+      # `build` == `tsc --noEmit && vite build`: type-checks and bundles the UI.
+      - name: Type-check & build
+        run: npm run build
+
+  rust:
+    name: Rust (clippy + test)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # `rpiboot` is a bundled runtime resource built from source in the release
+      # workflow. `tauri-build` only checks the resource *path* exists at compile
+      # time, so an empty placeholder lets clippy + tests run without the (slow)
+      # real build. The helper is never executed by the unit tests.
+      - name: Stage placeholder rpiboot resource
+        run: mkdir -p src-tauri/binaries/rpiboot
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --manifest-path src-tauri/Cargo.toml

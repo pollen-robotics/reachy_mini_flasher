@@ -12,6 +12,7 @@
 //! Requirements (provided out-of-band, see README / scripts/fetch-rpiboot.sh):
 //!   - the `rpiboot` binary,
 //!   - the `mass-storage-gadget64` boot-files directory.
+//!
 //! Resolved from (in order): env overrides, bundled resources, then $PATH.
 
 use std::path::{Path, PathBuf};
