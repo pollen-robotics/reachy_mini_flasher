@@ -1,0 +1,107 @@
+name: Build (Windows test installer)
+
+# Produces a real, installable Windows build and attaches it to the run as an
+# artifact, so a change can be tried on an actual machine before anyone tags a
+# release.
+#
+# This covers what `ci.yml` deliberately does not: `ci.yml` only runs clippy and
+# tests, against an EMPTY placeholder rpiboot folder. Everything that turns the
+# crate into a shippable app - the frontend build, WebView2, the WiX/NSIS
+# bundlers, `icon.ico`, and copying the ~40 MB `bundle.resources` rpiboot folder
+# in - is exercised here and nowhere else.
+#
+# The installers are UNSIGNED (no Windows signing certificate for this org), so
+# SmartScreen will warn on first run: "Windows protected your PC" -> More info
+# -> Run anyway. Same as what `release-windows.yml` currently produces.
+#
+# Updater artifacts are switched off via `src-tauri/tauri.ci.conf.json`: they
+# require the release signing key, and a throwaway test build has no business
+# being signed with it. Nothing else is overridden - the bundle targets stay
+# exactly as the release uses them, so this really does test that config.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'src-tauri/**'
+      - 'scripts/fetch-rpiboot.ps1'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'index.html'
+      - 'vite.config.ts'
+      - 'tsconfig*.json'
+      - '.github/workflows/build-windows.yml'
+
+jobs:
+  build:
+    name: Build unsigned installer
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # The real thing, not the placeholder ci.yml uses - this is what gets
+      # bundled into the installer as a Tauri resource.
+      - name: Stage rpiboot (+ mass-storage-gadget64, wdi-simple)
+        shell: pwsh
+        run: .\scripts\fetch-rpiboot.ps1
+
+      - name: Install JS dependencies
+        run: npm ci
+
+      - name: Build the app
+        run: npm run tauri:build -- --target x86_64-pc-windows-msvc --config src-tauri/tauri.ci.conf.json
+
+      - name: List bundle output
+        if: always()
+        shell: pwsh
+        run: |
+          $bundle = 'src-tauri\target\x86_64-pc-windows-msvc\release\bundle'
+          if (Test-Path $bundle) {
+            Get-ChildItem -Recurse $bundle -File | Select-Object FullName, Length
+          }
+          else {
+            Write-Warning "No bundle directory at $bundle"
+          }
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: reachy-mini-flasher-windows-unsigned
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+
+      # Informational: did the rpiboot resource get staged alongside the binary?
+      # Deliberately after the upload and non-fatal - where Tauri stages
+      # `bundle.resources` during a release build isn't something this has
+      # confirmed yet, so a miss here may just mean it only lives inside the
+      # installer. Installing the artifact is the authoritative check.
+      - name: Look for the bundled rpiboot resource
+        shell: pwsh
+        run: |
+          $root = 'src-tauri\target\x86_64-pc-windows-msvc\release'
+          foreach ($f in @('rpiboot.exe', 'wdi-simple.exe', 'bootfiles.bin')) {
+            $hit = Get-ChildItem -Path $root -Filter $f -Recurse -File -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+            if ($hit) { Write-Host "  ok      $f -> $($hit.FullName) ($($hit.Length) bytes)" }
+            else { Write-Warning "not staged next to the binary: $f" }
+          }
