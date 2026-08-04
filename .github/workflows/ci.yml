@@ -62,6 +62,25 @@ jobs:
       - name: Test
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
+  # We bundle rpiboot by unpacking Raspberry Pi's installer, whose internal
+  # layout is not a contract - upstream can move things whenever they rebuild it.
+  # Running the staging script here means a layout change shows up as a red CI
+  # run rather than as a broken release (or worse, a bundle that ships and fails
+  # on a user's machine). Cheap: a download and an extract, no build.
+  rpiboot-staging:
+    name: rpiboot staging (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stage rpiboot from the upstream installer
+        shell: pwsh
+        run: .\scripts\fetch-rpiboot.ps1
+
+      - name: Show what was staged
+        shell: pwsh
+        run: Get-ChildItem -Recurse src-tauri\binaries\rpiboot | Select-Object FullName, Length
+
   # The Windows-specific code (WinUSB driver binding, volume lock/dismount, the
   # PowerShell helpers) is compiled by NO other job: the macOS job `cfg`s it out
   # and there is no Windows release build yet. Without this it can only be found
