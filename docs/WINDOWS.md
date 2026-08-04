@@ -175,7 +175,13 @@ Windows, `Get-Disk`'s `FriendlyName` for the same gadget may differ.
 3. **Validate #2 and #3 on real hardware.** They are written and they compile,
    which is not the same as working.
 
-### How to test #2/#3 today, without waiting for #1
+> **A full hardware test procedure lives in
+> [`WINDOWS-TESTING.md`](WINDOWS-TESTING.md)** - phase by phase, with the two
+> values we're missing (the device `InstanceId` and the disk `FriendlyName`)
+> called out. Use that rather than the notes below if you have a robot and a
+> Windows machine in front of you.
+
+### How to test #2/#3 from a dev checkout
 
 On a Windows machine with the repo checked out:
 
