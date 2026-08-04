@@ -16,6 +16,9 @@
 //! Resolved from (in order): env overrides, bundled resources, then $PATH.
 
 use std::path::{Path, PathBuf};
+// Only the macOS path shells out directly; Windows elevation goes through
+// `win_ps::run_elevated`.
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -56,6 +59,15 @@ fn rpiboot_bin(app: &AppHandle) -> Option<PathBuf> {
             return Some(cand);
         }
     }
+    // Windows: reuse an existing RPiBoot installation. It's what we point users
+    // at for the WinUSB driver, and it brings rpiboot.exe along with it.
+    #[cfg(target_os = "windows")]
+    if let Some(dir) = crate::win_driver::rpiboot_install_dir() {
+        let cand = dir.join(bin_name());
+        if cand.is_file() {
+            return Some(cand);
+        }
+    }
     find_on_path(bin_name())
 }
 
@@ -70,6 +82,13 @@ fn gadget_dir(app: &AppHandle) -> Option<PathBuf> {
     if let Ok(res) = app.path().resource_dir() {
         let cand = res.join("rpiboot").join("mass-storage-gadget64");
         if cand.exists() {
+            return Some(cand);
+        }
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(dir) = crate::win_driver::rpiboot_install_dir() {
+        let cand = dir.join("mass-storage-gadget64");
+        if cand.is_dir() {
             return Some(cand);
         }
     }
@@ -109,6 +128,14 @@ pub async fn prepare_reachy(app: AppHandle) -> Result<(), String> {
 }
 
 fn run_rpiboot(app: &AppHandle) -> Result<(), String> {
+    // Windows: with no WinUSB driver bound to the CM4, rpiboot can't open the
+    // device at all. Say so up front - the UI turns this into an "install the
+    // driver" action - instead of letting rpiboot fail with a generic error.
+    #[cfg(target_os = "windows")]
+    if let Some(reason) = crate::win_driver::blocking_reason(app) {
+        return Err(reason);
+    }
+
     let bin = rpiboot_bin(app).ok_or_else(|| {
         "rpiboot was not found. Install it (see README) or set REACHY_RPIBOOT_BIN.".to_string()
     })?;
@@ -220,20 +247,15 @@ fn run_elevated_rpiboot(bin: &Path, dir: &Path) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn run_elevated_rpiboot(bin: &Path, dir: &Path) -> Result<(), String> {
-    let ps = format!(
-        "$p = Start-Process -FilePath '{}' -ArgumentList '-d','{}' -Verb RunAs -Wait -PassThru; exit $p.ExitCode",
-        bin.to_string_lossy(),
-        dir.to_string_lossy()
-    );
-    let out = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
-        .output()
-        .map_err(|e| format!("failed to request privileges: {e}"))?;
-
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err("rpiboot failed (is the WinUSB driver installed?)".to_string())
+    // The gadget directory is quoted: it sits under Program Files or the app's
+    // resource dir, both of which contain spaces.
+    let args = format!(r#"-d "{}""#, dir.to_string_lossy());
+    match crate::win_ps::run_elevated(bin, &args, None)? {
+        0 => Ok(()),
+        code => Err(format!(
+            "rpiboot failed (exit code {code}). Unplug and re-plug the USB cable with the \
+             switch on DOWNLOAD, then try again."
+        )),
     }
 }
 

@@ -120,31 +120,18 @@ mod platform {
 #[cfg(target_os = "windows")]
 mod platform {
     use super::DiskInfo;
-    use std::process::Command;
+    use crate::win_ps;
 
     pub fn list() -> Result<Vec<DiskInfo>, String> {
-        // Emit a stable JSON shape regardless of the number of disks.
-        let script = "Get-Disk | ForEach-Object { [PSCustomObject]@{ Number = $_.Number; FriendlyName = $_.FriendlyName; Size = [uint64]$_.Size; BusType = [string]$_.BusType; IsBoot = [bool]$_.IsBoot; IsSystem = [bool]$_.IsSystem } } | ConvertTo-Json -Compress -AsArray";
+        // NOTE: no `-AsArray`. That parameter only exists in PowerShell 6+, and
+        // `powershell.exe` on Windows 10/11 is Windows PowerShell 5.1, where it
+        // is a hard error - which made this whole function fail, so no disk was
+        // ever detected on Windows. `win_ps::json_array` handles the bare-object
+        // shape 5.1 emits for a single result instead.
+        let script = "Get-Disk | ForEach-Object { [PSCustomObject]@{ Number = $_.Number; FriendlyName = $_.FriendlyName; Size = [uint64]$_.Size; BusType = [string]$_.BusType; IsBoot = [bool]$_.IsBoot; IsSystem = [bool]$_.IsSystem } } | ConvertTo-Json -Compress";
 
-        let out = Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", script])
-            .output()
-            .map_err(|e| format!("failed to run powershell: {e}"))?;
-        if !out.status.success() {
-            return Err(format!(
-                "Get-Disk failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            ));
-        }
-
-        let text = String::from_utf8_lossy(&out.stdout);
-        let text = text.trim();
-        if text.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let parsed: Vec<RawDisk> =
-            serde_json::from_str(text).map_err(|e| format!("failed to parse Get-Disk JSON: {e}"))?;
+        let out = win_ps::run(script, "Get-Disk")?;
+        let parsed: Vec<RawDisk> = win_ps::json_array(&out, "Get-Disk")?;
 
         Ok(parsed
             .into_iter()

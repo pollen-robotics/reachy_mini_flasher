@@ -36,3 +36,15 @@ dirs = "6"
 [target.'cfg(target_os = "macos")'.dependencies]
 plist = "1"
 sendfd = "0.4"
+
+# Windows has no `diskutil unmountDisk` equivalent: the target's volumes must be
+# locked and dismounted through FSCTL ioctls before a raw write, and the
+# partition table refreshed after it (see src/win_volume.rs).
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+] }

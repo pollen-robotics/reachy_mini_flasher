@@ -243,6 +243,13 @@ pub fn do_flash(
             .output();
     }
 
+    // Windows equivalent of the `diskutil unmountDisk` above, except the locks
+    // have to be *held* for the whole write - hence a guard rather than a call.
+    // Dropping it at the end of this function unlocks the volumes and refreshes
+    // the partition table. See `win_volume` for why this is mandatory.
+    #[cfg(target_os = "windows")]
+    let _disk_lock = crate::win_volume::lock_disk(target)?;
+
     let lower = image_path.to_lowercase();
     let is_gz = lower.ends_with(".gz");
     let is_zip = lower.ends_with(".zip");
@@ -471,20 +478,13 @@ fn run_elevated(
     target: &str,
     progress: &str,
 ) -> Result<bool, String> {
-    let args = format!(
-        "'flash-worker','{}','{}','{}','{}'",
-        image, bmap, target, progress
-    );
-    let ps = format!(
-        "$p = Start-Process -FilePath '{}' -ArgumentList {} -Verb RunAs -Wait -PassThru; exit $p.ExitCode",
-        exe.to_string_lossy(),
-        args
-    );
-    let out = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
-        .output()
-        .map_err(|e| format!("failed to request privileges: {e}"))?;
-    Ok(out.status.success())
+    // Each argument is double-quoted inside the command line: the image lives
+    // under the app cache (`C:\Users\<name>\AppData\...`), which contains a
+    // space for plenty of users, and the previous comma-separated `-ArgumentList`
+    // array form let PowerShell split those paths into several arguments.
+    let args = format!(r#"flash-worker "{image}" "{bmap}" "{target}" "{progress}""#);
+    let code = crate::win_ps::run_elevated(exe, &args, None)?;
+    Ok(code == 0)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]

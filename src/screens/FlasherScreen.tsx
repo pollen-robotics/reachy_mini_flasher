@@ -40,12 +40,16 @@ import { FONT_WEIGHT } from '@/design/tokens';
 import {
   detectReachy,
   flashReachy,
+  installWinusbDriver,
+  needsWinusbDriver,
   onFlashProgress,
   openUrl,
   prefetchImage,
   prepareReachy,
+  winusbStatus,
   type FlashProgress,
   type ReachyDevice,
+  type WinUsbStatus,
 } from '@/lib/api';
 
 /** Public troubleshooting docs (same target as the mobile app). */
@@ -344,6 +348,12 @@ export function FlasherScreen() {
   // mid-prepare; only a sustained absence means the robot was really unplugged.
   const missCountRef = useRef(0);
 
+  // WinUSB driver (Windows only). Without it Windows won't let the app talk to
+  // the CM4 at all, so the robot looks absent even while plugged in. Stays null
+  // on macOS, where `applicable` is false and none of this renders.
+  const [driver, setDriver] = useState<WinUsbStatus | null>(null);
+  const [installingDriver, setInstallingDriver] = useState(false);
+
   // After a while without any device, hint that the board might be dead.
   const [waitTimedOut, setWaitTimedOut] = useState(false);
 
@@ -469,6 +479,52 @@ export function FlasherScreen() {
     const id = setTimeout(() => setWaitTimedOut(true), 25000);
     return () => clearTimeout(id);
   }, [waiting]);
+
+  // Windows: while we're waiting for a robot that never shows up, check whether
+  // one is actually sitting there without a WinUSB driver bound - that's the
+  // difference between "nothing plugged in" and "plugged in but Windows won't
+  // let us near it". Slower than the 1.5s device poll because each check spawns
+  // a PowerShell query, and the backend caches it for a few seconds anyway.
+  useEffect(() => {
+    if (!waiting) return;
+    let active = true;
+    const check = async () => {
+      try {
+        const s = await winusbStatus();
+        if (!active) return;
+        setDriver(s);
+        // Nothing to watch for on macOS - stop after the first answer.
+        if (!s.applicable) clearInterval(id);
+      } catch {
+        /* leave the previous status in place */
+      }
+    };
+    void check();
+    const id = setInterval(check, 4000);
+    return () => {
+      active = false;
+      clearInterval(id);
+    };
+  }, [waiting]);
+
+  const driverNeeded = needsWinusbDriver(driver);
+
+  // Bind WinUSB to the CM4, then re-check so the UI moves on by itself once the
+  // driver takes (the device re-enumerates and normal detection picks it up).
+  const installDriver = useCallback(async () => {
+    setInstallingDriver(true);
+    setPrepareError(null);
+    try {
+      await installWinusbDriver();
+      setDriver(await winusbStatus());
+      // Let the normal flow re-run rpiboot now that the device is reachable.
+      prepareStartedRef.current = false;
+    } catch (e) {
+      setPrepareError(String(e));
+    } finally {
+      setInstallingDriver(false);
+    }
+  }, []);
 
   // Route progress: downloading -> chip + version, otherwise -> flash.
   useEffect(() => {
@@ -618,10 +674,25 @@ export function FlasherScreen() {
   } else if (effStatus === 'connect') {
     if (effConnectStep >= CONNECT_WAIT) {
       backAction = { label: 'Back', onClick: onBack };
-      // Still searching: Next is present but disabled until a robot is picked.
-      primaryAction = effPrepareError
-        ? { label: 'Try again', onClick: retryPrepare }
-        : { label: 'Next', onClick: onSelect, disabled: true };
+      // A missing WinUSB driver outranks everything else here: until it's bound,
+      // Windows keeps the robot invisible and "Try again" can only fail again.
+      // With `wdi-simple` available we bind it ourselves; otherwise the only
+      // route is Raspberry Pi's own installer.
+      primaryAction = driverNeeded
+        ? driver?.can_install
+          ? {
+              label: installingDriver ? 'Installing...' : 'Install USB driver',
+              onClick: () => void installDriver(),
+              disabled: installingDriver,
+            }
+          : {
+              label: 'Get the driver',
+              onClick: () => void openUrl(driver?.installer_url ?? TROUBLESHOOTING_URL),
+            }
+        : // Still searching: Next is present but disabled until a robot is picked.
+          effPrepareError
+          ? { label: 'Try again', onClick: retryPrepare }
+          : { label: 'Next', onClick: onSelect, disabled: true };
     } else if (effConnectStep === CONNECT_WARN) {
       // Dedicated heads-up screen: Back to the last instruction, continue to the
       // waiting/detection screen (where the system prompts fire).
@@ -849,6 +920,8 @@ export function FlasherScreen() {
                   preparing={effPreparing}
                   prepareError={effPrepareError}
                   timedOut={waitTimedOut}
+                  driverNeeded={driverNeeded}
+                  driverCanInstall={!!driver?.can_install}
                 />
               ) : effConnectStep === CONNECT_WARN ? (
                 <SystemPromptsBody />
@@ -1222,6 +1295,8 @@ function SelectReachyBody({
   preparing,
   prepareError,
   timedOut,
+  driverNeeded = false,
+  driverCanInstall = false,
 }: {
   device: ReachyDevice | null;
   selected: boolean;
@@ -1229,6 +1304,9 @@ function SelectReachyBody({
   preparing: boolean;
   prepareError: string | null;
   timedOut: boolean;
+  /** Windows: robot detected in the PnP tree, but no WinUSB driver bound. */
+  driverNeeded?: boolean;
+  driverCanInstall?: boolean;
 }) {
   const sizeGB = device && device.size > 0 ? Math.max(1, Math.round(device.size / 1e9)) : null;
   const subtitle =
@@ -1240,7 +1318,9 @@ function SelectReachyBody({
 
   return (
     <Stack spacing={2} sx={BODY_STACK_SX}>
-      <Typography sx={TITLE_SX}>{device ? 'Reachy found' : 'Looking for your Reachy'}</Typography>
+      <Typography sx={TITLE_SX}>
+        {device ? 'Reachy found' : driverNeeded ? 'One-time driver setup' : 'Looking for your Reachy'}
+      </Typography>
       {/* Reserve a fixed 2-line height (and enough width) so switching between
           the searching and found copy never shifts the layout below. */}
       <Typography sx={{ ...DESC_SX, maxWidth: 400, minHeight: '3em' }}>
@@ -1248,6 +1328,21 @@ function SelectReachyBody({
           <>
             Your <Tag>Reachy</Tag> is connected and <B>ready to be flashed</B> - select it below to continue.
           </>
+        ) : driverNeeded ? (
+          // The robot IS there - Windows just has no driver for it yet. Say that
+          // plainly, otherwise this reads as a detection failure and the user
+          // starts re-plugging cables that were never the problem.
+          driverCanInstall ? (
+            <>
+              Your <Tag>Reachy</Tag> is connected, but Windows needs a <B>USB driver</B> before it
+              can talk to it. Install it below - this is only ever asked once.
+            </>
+          ) : (
+            <>
+              Your <Tag>Reachy</Tag> is connected, but Windows needs a <B>USB driver</B> before it
+              can talk to it. Install <Tag>RPiBoot</Tag> from Raspberry Pi, then come back.
+            </>
+          )
         ) : (
           <>
             Make sure it&apos;s <B>powered on</B>, in <Tag>DOWNLOAD</Tag> mode, and connected over{' '}
@@ -1889,6 +1984,15 @@ function humanizeError(raw: string): { title: string; message: string } {
       message: 'Admin access is needed to prepare the robot. Try again and approve the prompt.',
     };
   }
+  // Windows driver errors must be checked BEFORE the rpiboot branch: they carry
+  // the RPiBoot installer URL as a fallback, which would otherwise match it.
+  if (/usb driver|winusb|wdi-simple/.test(e)) {
+    return {
+      title: 'USB driver needed',
+      message:
+        "Windows needs a one-time USB driver before it can talk to the robot's board. Install it from this screen, then try again.",
+    };
+  }
   // rpiboot (USB preparation) failures must be checked BEFORE the generic
   // disk-access branch: rpiboot talks to the CM4 over USB, so its errors are
   // not a Full Disk Access / TCC problem and must not be mislabeled as one.
@@ -1903,6 +2007,14 @@ function humanizeError(raw: string): { title: string; message: string } {
       title: "Couldn't prepare the robot",
       message:
         'Failed to expose the CM4 storage over USB. Unplug and re-plug the USB cable (switch on DOWNLOAD), then try again.',
+    };
+  }
+  // Windows: a volume on the target disk refused to be locked/dismounted.
+  if (e.includes('would not release')) {
+    return {
+      title: 'Storage is busy',
+      message:
+        "Windows wouldn't release the robot's storage. Close any Explorer window showing that drive (and pause antivirus scanning of it), then try again.",
     };
   }
   if (/operation not permitted|permission|full disk/.test(e)) {
