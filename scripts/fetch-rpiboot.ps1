@@ -31,8 +31,11 @@
     and an upstream change can't silently alter what we ship.
 
 .PARAMETER Sha256
-    Optional expected SHA-256 of rpiboot_setup.exe. The hash of what was
-    downloaded is always printed, so this can be pinned after a first run.
+    Expected SHA-256 of rpiboot_setup.exe. Defaults to the known-good hash for
+    $Release when we have one (see $KnownHashes), so the default path is
+    verified rather than trusting whatever the URL serves. Pass a hash explicitly
+    when moving to a release that isn't listed yet - the hash of what was
+    downloaded is always printed, so a new one is one run away.
 
 .EXAMPLE
     .\scripts\fetch-rpiboot.ps1
@@ -50,6 +53,15 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+# Known-good hashes, so the pinned release is actually verified and not merely
+# named. A release asset can be re-uploaded; a tag is not a content guarantee.
+$KnownHashes = @{
+    'windows-v1.1' = '4f700ef27909a543051270153ac238f48dee91736ecfa558b6c94f1184d66c15'
+}
+if (-not $Sha256 -and $KnownHashes.ContainsKey($Release)) {
+    $Sha256 = $KnownHashes[$Release]
+}
 
 $FlasherRoot = Split-Path -Parent $PSScriptRoot
 $Dest = Join-Path $FlasherRoot 'src-tauri\binaries\rpiboot'
@@ -95,8 +107,14 @@ try {
 
     $actual = (Get-FileHash -Path $installer -Algorithm SHA256).Hash.ToLower()
     Write-Host "==> SHA-256: $actual"
-    if ($Sha256 -and $actual -ne $Sha256.ToLower()) {
-        throw "Checksum mismatch for rpiboot_setup.exe.`n  expected: $($Sha256.ToLower())`n  actual:   $actual"
+    if ($Sha256) {
+        if ($actual -ne $Sha256.ToLower()) {
+            throw "Checksum mismatch for rpiboot_setup.exe.`n  expected: $($Sha256.ToLower())`n  actual:   $actual`nRefusing to bundle it. If upstream legitimately re-published '$Release', update `$KnownHashes in this script."
+        }
+        Write-Host "    checksum verified"
+    }
+    else {
+        Write-Warning "No known hash for release '$Release' - bundling it unverified. Add the hash above to `$KnownHashes to pin it."
     }
 
     # --- Unpack ------------------------------------------------------------
