@@ -1,0 +1,100 @@
+name: Release (Windows)
+
+# Builds the Reachy Mini Flasher Windows installers (.msi + NSIS .exe) and
+# attaches them to a GitHub release. Triggered by pushing a version tag (e.g.
+# `v0.1.0`), or manually via the Actions tab.
+#
+# Counterpart of `release-macos.yml`. Both attach to the SAME draft release for
+# a given tag: `tauri-action` merges platform entries into the existing
+# `latest.json` rather than replacing it, which is what keeps the in-app updater
+# working for every platform (the two macOS matrix runners already rely on this).
+#
+# `rpiboot` is NOT built from source here. On Windows it's a prebuilt Cygwin
+# binary that only ships inside Raspberry Pi's installer, so
+# `scripts/fetch-rpiboot.ps1` unpacks that instead - including the two Cygwin
+# DLLs it needs to start and `wdi-simple.exe`, which is what lets the app bind
+# the WinUSB driver itself instead of sending the user off to install RPiBoot.
+#
+# Code signing is NOT set up: there is no Windows signing certificate for this
+# org. The installers are therefore unsigned and SmartScreen will warn on first
+# run ("Windows protected your PC" -> More info -> Run anyway). To sign later,
+# add the cert as secrets and set `windows.signCommand` (or the
+# `TAURI_WINDOWS_SIGNTOOL_*` inputs) - see https://tauri.app/distribute/sign/windows/.
+#
+# x86_64 only. Windows-on-ARM would need its own target, and rpiboot.exe is an
+# x64 binary regardless (Windows 11 ARM emulates it, but that is untested here).
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage_only:
+        description: 'Only stage rpiboot and verify it, then stop (no build, no release)'
+        type: boolean
+        default: false
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # Downloads rpiboot_setup.exe from a pinned upstream release, unpacks it,
+      # and stages rpiboot.exe + the Cygwin DLLs + mass-storage-gadget64 +
+      # wdi-simple.exe into src-tauri/binaries/rpiboot/. Fails loudly if the
+      # installer layout changed or bootfiles.bin came out as the placeholder.
+      - name: Stage rpiboot (+ mass-storage-gadget64, wdi-simple)
+        shell: pwsh
+        run: .\scripts\fetch-rpiboot.ps1
+
+      - name: Show what was staged
+        shell: pwsh
+        run: Get-ChildItem -Recurse src-tauri\binaries\rpiboot | Select-Object FullName, Length
+
+      # `stage_only` exists so the staging step can be validated on its own -
+      # upstream could change the installer layout at any time, and finding that
+      # out while trying to cut a release is the wrong moment.
+      - name: Install JS dependencies
+        if: inputs.stage_only != true
+        run: npm ci
+
+      - name: Build & release the Windows app (unsigned)
+        if: inputs.stage_only != true
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # --- Updater signing (minisign) --------------------------------------
+          # Signs the bundle + merges this platform into `latest.json` so the
+          # in-app self-update (tauri-plugin-updater) can verify and install new
+          # versions. Same key as the macOS workflow; the matching public key
+          # lives in `tauri.conf.json > plugins.updater`.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: .
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', github.run_number) }}
+          releaseName: 'Reachy Mini Flasher ${{ github.ref_name }}'
+          releaseDraft: true
+          prerelease: false
+          args: --target x86_64-pc-windows-msvc

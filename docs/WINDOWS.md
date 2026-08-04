@@ -56,37 +56,48 @@ real flash fail regardless of the items below:
 
 ## Remaining work
 
-### 1. Bundle `rpiboot.exe` + `mass-storage-gadget64` for Windows
+### 1. Bundle `rpiboot.exe` + `mass-storage-gadget64` - ✅ implemented (needs one CI run to confirm)
 
-`scripts/fetch-rpiboot.sh` is bash-only (macOS/Linux). It builds `rpiboot` from
-source and stages it into `src-tauri/binaries/rpiboot/`, which is then bundled
-via the `bundle.resources` entry in `tauri.conf.json`.
+`scripts/fetch-rpiboot.sh` is bash-only and builds `rpiboot` from source. On
+Windows there is no build worth doing: `rpiboot.exe` is a prebuilt **Cygwin**
+binary that is *not* checked into raspberrypi/usbboot - it only exists inside
+`rpiboot_setup.exe`.
 
-On Windows there is no build step - the artifacts must be fetched from the
-prebuilt RPiBoot installer:
+**Implemented** as `scripts/fetch-rpiboot.ps1`, which downloads that installer
+from a **pinned** upstream release (`windows-v1.1`, whose notes call out CM4
+SDRAM support), unpacks it with 7-Zip and stages into
+`src-tauri/binaries/rpiboot/`:
 
-- Installer: <https://github.com/raspberrypi/usbboot/raw/master/win32/rpiboot_setup.exe>
-- Copy `rpiboot.exe` **and** the `mass-storage-gadget64/` directory into
-  `src-tauri/binaries/rpiboot/`.
+| File | Why |
+|---|---|
+| `rpiboot.exe` | the loader |
+| `cygusb-1.0.dll`, `cygwin1.dll` | Cygwin runtime - `rpiboot.exe` won't start without both |
+| `mass-storage-gadget64/` | boot files, including the **real** `bootfiles.bin` |
+| `wdi-simple.exe` | libwdi helper item #2 uses to bind the WinUSB driver |
 
-**TODO:** add `scripts/fetch-rpiboot.ps1` (PowerShell) that downloads/extracts
-these into `src-tauri/binaries/rpiboot/`, and call it from the Windows release
-workflow before `tauri build`. `rpiboot.rs` already looks for `rpiboot.exe` in
-the bundled `rpiboot/` resource dir, so no Rust change is needed.
+Two traps that cost real debugging time if missed, both now asserted by the
+script:
 
-Three things that script must get right, learned from reading
-`win32/install_script.nsi` upstream:
+- **the Cygwin DLLs.** Copying `rpiboot.exe` alone yields a binary that dies on
+  launch with no useful message.
+- **`bootfiles.bin`.** In the git repo it's a 25-byte symlink placeholder to
+  `../firmware/bootfiles.bin`; only the installer carries the real payload. Feed
+  rpiboot the placeholder and it fails with `No 'bootcode' files found`. The
+  script size-checks it and refuses to produce a broken bundle.
 
-- `rpiboot.exe` on Windows is a **Cygwin build**: it needs `cygusb-1.0.dll` and
-  `cygwin1.dll` next to it or it won't start.
-- stage `redist/wdi-simple.exe` too - that's what item #2 uses to bind the
-  driver, and without it the app can only send users to the RPiBoot installer.
-- the boot files are `mass-storage-gadget64/` **plus** `firmware/bootfiles.bin`
-  (the NSIS script copies the latter into the former).
+`.github/workflows/release-windows.yml` calls it before `tauri build` and
+produces unsigned `.msi` + NSIS installers. It has a `stage_only` dispatch input
+that runs the staging and verification alone, so an upstream layout change can be
+caught without cutting a release.
 
-Until then, `rpiboot.rs` and `win_driver.rs` fall back to an existing RPiBoot
-installation (`HKCU\Software\Raspberry Pi`, else `%ProgramFiles%\Raspberry Pi`),
-so a machine that ran the official installer already works end to end.
+Note the resource layout: `win_driver.rs` looks for `wdi-simple.exe` directly in
+the bundled `rpiboot/` dir, **not** in a `redist/` subdirectory as the upstream
+installer lays it out.
+
+Independently of all this, `rpiboot.rs` and `win_driver.rs` also fall back to an
+existing RPiBoot installation (`HKCU\Software\Raspberry Pi`, else
+`%ProgramFiles%\Raspberry Pi`), so a machine that ran the official installer
+works without any bundling at all.
 
 ### 2. WinUSB driver for the CM4 - ✅ implemented (untested on hardware)
 
