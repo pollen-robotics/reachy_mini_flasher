@@ -261,7 +261,7 @@ mod platform {
 
         let args = format!(
             "-n \"{DRIVER_NAME}\" -v 0x{BROADCOM_VID:04x} -p 0x{CM4_PID:04x} -t 0 -d \"{}\"",
-            workdir.display()
+            win_ps::simplify(&workdir)
         );
         match win_ps::run_elevated(&bin, &args, None)? {
             0 => Ok(()),

@@ -293,8 +293,8 @@ fn run_elevated_rpiboot(bin: &Path, dir: &Path) -> Result<(), String> {
 
     let args = format!(
         r#"/c ""{}" -d "{}" > "{}" 2>&1""#,
-        bin.display(),
-        dir.display(),
+        crate::win_ps::simplify(bin),
+        crate::win_ps::simplify(dir),
         out_file.display()
     );
     crate::flash::log(&format!("rpiboot: cmd.exe {args}"));

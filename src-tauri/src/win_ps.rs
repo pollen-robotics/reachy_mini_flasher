@@ -88,6 +88,25 @@ pub fn run(script: &str, what: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Strip the `\\?\` extended-length prefix from a path.
+///
+/// Tauri's `resource_dir()` hands back verbatim paths on Windows, and almost
+/// nothing outside the Win32 file APIs will take one: `cmd.exe` answers "The
+/// system cannot find the path specified", and rpiboot - a Cygwin binary -
+/// quietly fails to locate its boot files and exits immediately. Any path
+/// leaving this process for another program has to go through here.
+///
+/// `\\.\` device paths (the flash target, `\\.\PhysicalDrive1`) are a *different*
+/// prefix and must survive untouched - hence matching on `\\?\` exactly.
+pub fn simplify(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    // \\?\UNC\server\share -> \\server\share
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
+}
+
 /// Wrap a value in a PowerShell single-quoted string, escaping quotes.
 ///
 /// Single-quoted strings are literal in PowerShell (no `$var` expansion), and
@@ -130,16 +149,13 @@ pub fn json_array<T: DeserializeOwned>(text: &str, what: &str) -> Result<Vec<T>,
 pub fn run_elevated(exe: &Path, args: &str, working_dir: Option<&Path>) -> Result<i32, String> {
     let mut script = format!(
         "$ErrorActionPreference='Stop'; try {{ $p = Start-Process -FilePath {} -Verb RunAs -Wait -PassThru",
-        quote(&exe.to_string_lossy())
+        quote(&simplify(exe))
     );
     if !args.is_empty() {
         script.push_str(&format!(" -ArgumentList {}", quote(args)));
     }
     if let Some(dir) = working_dir {
-        script.push_str(&format!(
-            " -WorkingDirectory {}",
-            quote(&dir.to_string_lossy())
-        ));
+        script.push_str(&format!(" -WorkingDirectory {}", quote(&simplify(dir))));
     }
     // A declined UAC prompt makes Start-Process throw; report it distinctly.
     script.push_str(&format!(" }} catch {{ exit {EXIT_CANCELLED} }}; exit $p.ExitCode"));
@@ -175,6 +191,21 @@ mod tests {
         assert_eq!(super::encode_command("ABC"), "QQBCAEMA");
         // The case that broke rpiboot: a script carrying a quoted path.
         assert_eq!(super::encode_command("\"a b\""), "IgBhACAAYgAiAA==");
+    }
+
+    #[test]
+    fn strips_the_verbatim_prefix() {
+        use std::path::Path;
+        // What Tauri's resource_dir() returns, and what broke rpiboot.
+        assert_eq!(
+            super::simplify(Path::new(r"\\?\C:\Program Files\app\rpiboot.exe")),
+            r"C:\Program Files\app\rpiboot.exe"
+        );
+        assert_eq!(super::simplify(Path::new(r"\\?\UNC\srv\share\x")), r"\\srv\share\x");
+        // Device paths use a different prefix and must be left alone - the
+        // flash target is one of these.
+        assert_eq!(super::simplify(Path::new(r"\\.\PhysicalDrive1")), r"\\.\PhysicalDrive1");
+        assert_eq!(super::simplify(Path::new(r"C:\plain\path")), r"C:\plain\path");
     }
 
     #[test]
