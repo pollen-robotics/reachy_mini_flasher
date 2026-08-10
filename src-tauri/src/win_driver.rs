@@ -235,19 +235,35 @@ mod platform {
             )
         })?;
 
-        // wdi-simple extracts the generated driver package into `usb_driver/`
-        // relative to its working directory, so give it a writable one of our
-        // own (the RPiBoot installer uses its install dir for this).
-        let workdir = app
+        // wdi-simple extracts the generated driver package to a directory it
+        // resolves relative to its OWN executable, not to the process working
+        // directory - so `-WorkingDirectory` has no effect on it whatsoever.
+        // Left to itself it writes `usb_driver/` into our installation folder
+        // under Program Files, which then needs admin rights to clean up.
+        //
+        // That matters because libwdi refuses to reuse an existing extraction
+        // directory: it calls CreateDirectory, gets ERROR_ALREADY_EXISTS and
+        // fails the whole install with WDI_ERROR_ACCESS (-3). One failed run
+        // therefore poisons every later attempt - the button stops working for
+        // good, with nothing to show for it. Observed on real hardware.
+        //
+        // So: hand it an absolute, user-writable path, and clear it first.
+        let base = app
             .path()
             .app_cache_dir()
-            .unwrap_or_else(|_| std::env::temp_dir())
-            .join("winusb-driver");
-        std::fs::create_dir_all(&workdir)
+            .unwrap_or_else(|_| std::env::temp_dir());
+        std::fs::create_dir_all(&base)
             .map_err(|e| format!("failed to create the driver staging dir: {e}"))?;
+        let workdir = base.join("winusb-driver");
+        // Deliberately removed and NOT recreated - see above, libwdi wants to
+        // create this itself and errors out if it already exists.
+        let _ = std::fs::remove_dir_all(&workdir);
 
-        let args = format!("-n \"{DRIVER_NAME}\" -v 0x{BROADCOM_VID:04x} -p 0x{CM4_PID:04x} -t 0");
-        match win_ps::run_elevated(&bin, &args, Some(&workdir))? {
+        let args = format!(
+            "-n \"{DRIVER_NAME}\" -v 0x{BROADCOM_VID:04x} -p 0x{CM4_PID:04x} -t 0 -d \"{}\"",
+            workdir.display()
+        );
+        match win_ps::run_elevated(&bin, &args, None)? {
             0 => Ok(()),
             // libwdi reports its own negative error codes; there's no useful
             // mapping to expose, but the code helps when a user reports back.

@@ -2008,6 +2008,14 @@ function humanizeError(raw: string): { title: string; message: string } {
       message: 'Admin access is needed to prepare the robot. Try again and approve the prompt.',
     };
   }
+  // A driver install that actually FAILED must keep its own message: it carries
+  // the installer's exit code, which is the only clue to what went wrong. This
+  // branch has to come first - the backend's text mentions "USB driver", so the
+  // generic branch below would otherwise swallow it and re-render as "you need
+  // to install a driver", looping the user with no diagnosis. That happened.
+  if (e.includes('could not be installed')) {
+    return { title: "Driver install failed", message: raw };
+  }
   // Windows driver errors must be checked BEFORE the rpiboot branch: they carry
   // the RPiBoot installer URL as a fallback, which would otherwise match it.
   if (/usb driver|winusb|wdi-simple/.test(e)) {
