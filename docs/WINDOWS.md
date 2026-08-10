@@ -4,15 +4,17 @@ The flasher is written to be cross-platform and **already has Windows code paths
 for every OS-specific operation**. It compiles on Windows and produces `.msi` /
 `.nsis` installers, and the **simulation flow** (`REACHY_FLASHER_SIM=1`) works.
 
-However, **the real end-to-end flash has never been tested on Windows**, and a
-few concrete gaps remain before it can be considered working. This document
-tracks them.
+A full flash **has** now been performed on Windows and the robot booted, so the
+approach is sound end to end. What is not yet proven is that it works without
+manual intervention - see the TL;DR. This document tracks the remaining gap and
+records what was measured.
 
 > **TL;DR** - macOS is release-ready (see `.github/workflows/release-macos.yml`).
-> All four items are now implemented. On Windows, everything **up to and
-> including exposing the eMMC** has been confirmed on real hardware (a Reachy
-> Mini Wireless on Windows 11): the driver binds, rpiboot runs, and the disk is
-> detected. The **flash itself - item #3's volume lock - is still unverified.**
+> All four items are implemented, and **the whole path has been run on real
+> hardware**: a Reachy Mini Wireless flashed from Windows 11 boots afterwards.
+> One caveat - that run needed `Clear-Disk` by hand to drop the mounted volume,
+> because item #3's lock was skipping it. That bug is fixed but **the fix has
+> not been retested on hardware yet**, so an unaided flash is still unproven.
 
 ---
 
