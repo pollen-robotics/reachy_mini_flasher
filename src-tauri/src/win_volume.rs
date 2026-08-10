@@ -18,10 +18,11 @@
 //!   3. `FSCTL_DISMOUNT_VOLUME` each one,
 //!   4. **keep the handles open** for the whole write - closing one releases the
 //!      lock and lets Windows remount the volume mid-flash,
-//!   5. `IOCTL_DISK_DELETE_DRIVE_LAYOUT` so the partition table is gone and
-//!      nothing gets auto-mounted while we work,
-//!   6. on drop: release the locks and `IOCTL_DISK_UPDATE_PROPERTIES` so
+//!   5. on drop: release the locks and `IOCTL_DISK_UPDATE_PROPERTIES` so
 //!      Explorer re-reads the freshly written partition table.
+//!
+//! Note what is NOT done: deleting the partition table up front. It voids the
+//! locks we just took - see `lock_disk`.
 //!
 //! `lock_disk()` returns a guard; hold it until the write is finished.
 
@@ -38,8 +39,8 @@ use windows::Win32::Storage::FileSystem::{
     FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows::Win32::System::Ioctl::{
-    FSCTL_DISMOUNT_VOLUME, FSCTL_LOCK_VOLUME, IOCTL_DISK_DELETE_DRIVE_LAYOUT,
-    IOCTL_DISK_UPDATE_PROPERTIES, IOCTL_STORAGE_GET_DEVICE_NUMBER, STORAGE_DEVICE_NUMBER,
+    FSCTL_DISMOUNT_VOLUME, FSCTL_LOCK_VOLUME, IOCTL_DISK_UPDATE_PROPERTIES,
+    IOCTL_STORAGE_GET_DEVICE_NUMBER, STORAGE_DEVICE_NUMBER,
 };
 use windows::Win32::System::IO::DeviceIoControl;
 
@@ -258,19 +259,22 @@ pub fn lock_disk(target: &str) -> Result<Option<DiskLock>, String> {
     // it is also exactly what a broken enumeration looks like, so say which.
     crate::flash::log(&format!("locked {} volume(s) on PhysicalDrive{disk_number}", locked.len()));
 
-    // With every volume locked and dismounted, drop the partition table so
-    // Windows has nothing left to auto-mount while the image is written. Best
-    // effort: on a disk that is already RAW there is no layout to delete, and
-    // the write is fine either way.
-    let disk_path = format!("\\\\.\\PhysicalDrive{disk_number}");
-    match open_device(&disk_path, ACCESS_RW) {
-        Ok(disk) => {
-            if let Err(e) = ioctl_void(&disk, IOCTL_DISK_DELETE_DRIVE_LAYOUT) {
-                crate::flash::log(&format!("IOCTL_DISK_DELETE_DRIVE_LAYOUT on {disk_path} failed: {e}"));
-            }
-        }
-        Err(e) => crate::flash::log(&format!("could not open {disk_path} to clear its layout: {e}")),
-    }
+    // NOTE: deliberately NO `IOCTL_DISK_DELETE_DRIVE_LAYOUT` here.
+    //
+    // Wiping the partition table looks tidy - nothing left for Windows to
+    // auto-mount - and balenaEtcher does it. But it makes Windows re-read the
+    // layout, which tears down the volume objects and builds fresh ones. Our
+    // locks are held against the *old* objects, so they are silently voided:
+    // the replacement volume is mounted, unlocked, and blocks the very write we
+    // just prepared for. Observed on real hardware as
+    //
+    //     locked 1 volume(s) on PhysicalDrive1
+    //     ERR failed to flush: Access is denied. (os error 5)
+    //
+    // Locking and dismounting is the documented requirement and is sufficient
+    // on its own; the dismounted volumes cannot remount while we hold their
+    // handles. The image overwrites the partition table anyway, and the drop
+    // handler asks Windows to re-read it afterwards.
 
     Ok(Some(DiskLock { disk_number, _volumes: locked }))
 }
