@@ -280,16 +280,46 @@ fn run_elevated_rpiboot(bin: &Path, dir: &Path) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn run_elevated_rpiboot(bin: &Path, dir: &Path) -> Result<(), String> {
-    // The gadget directory is quoted: it sits under Program Files or the app's
-    // resource dir, both of which contain spaces.
-    let args = format!(r#"-d "{}""#, dir.to_string_lossy());
-    match crate::win_ps::run_elevated(bin, &args, None)? {
-        0 => Ok(()),
-        code => Err(format!(
-            "rpiboot failed (exit code {code}). Unplug and re-plug the USB cable with the \
-             switch on DOWNLOAD, then try again."
-        )),
+    // rpiboot's console belongs to the elevated child and vanishes the instant
+    // it exits, taking with it the only thing that ever explains a failure. And
+    // `Start-Process -Verb RunAs` cannot be combined with output redirection -
+    // they are different parameter sets - so route it through `cmd.exe`, whose
+    // redirection lands the output in a file we can read back.
+    //
+    // This is not just for debugging: the tail of that output is what the user
+    // gets told, instead of a bare exit code that says nothing.
+    let out_file = std::env::temp_dir().join("reachy-rpiboot.log");
+    let _ = std::fs::remove_file(&out_file);
+
+    let args = format!(
+        r#"/c ""{}" -d "{}" > "{}" 2>&1""#,
+        bin.display(),
+        dir.display(),
+        out_file.display()
+    );
+    crate::flash::log(&format!("rpiboot: cmd.exe {args}"));
+
+    let code = crate::win_ps::run_elevated(Path::new("cmd.exe"), &args, None)?;
+    let output = std::fs::read_to_string(&out_file).unwrap_or_default();
+    crate::flash::log(&format!(
+        "rpiboot: exit={code}\n--- rpiboot output ---\n{}\n--- end ---",
+        output.trim()
+    ));
+
+    if code == 0 {
+        return Ok(());
     }
+    // Surface what rpiboot actually said; the last lines carry the reason.
+    let tail: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
+    let tail = tail
+        .iter()
+        .rev()
+        .take(4)
+        .rev()
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" / ");
+    Err(format!("rpiboot failed (exit code {code}): {tail}"))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]

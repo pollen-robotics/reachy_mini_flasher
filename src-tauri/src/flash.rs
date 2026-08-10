@@ -512,14 +512,26 @@ fn run_elevated(_: &Path, _: &str, _: &str, _: &str, _: &str) -> Result<bool, St
 /// next to the progress file instead.
 static LOG_PATH: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
 
-/// Append a diagnostic line to the worker log (no-op outside the worker).
+/// Append a diagnostic line to the log.
+///
+/// The worker points this at `<progress>.log`; everything else (the GUI
+/// process, notably the rpiboot stage) falls back to a fixed file, because a
+/// GUI build has nowhere else to put diagnostics at all.
 pub fn log(msg: &str) {
     eprintln!("{msg}");
     let guard = match LOG_PATH.lock() {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
     };
-    if let Some(path) = guard.as_ref() {
+    let fallback;
+    let path = match guard.as_ref() {
+        Some(p) => Some(p),
+        None => {
+            fallback = std::env::temp_dir().join("reachy-flasher.log");
+            Some(&fallback)
+        }
+    };
+    if let Some(path) = path {
         use std::io::Write as _;
         if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path) {
             let _ = writeln!(f, "{msg}");
