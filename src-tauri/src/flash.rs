@@ -440,6 +440,16 @@ fn flash_elevated(
     let final_content = fs::read_to_string(&progress).unwrap_or_default();
     let _ = fs::remove_file(&progress);
 
+    // The worker records its own verdict in the progress file, and that is the
+    // authoritative one: it is written by the process that did the work. The
+    // exit status has to travel back through an elevation shim, which is a far
+    // weaker signal - so a worker that says DONE succeeded, whatever the shim
+    // reports.
+    if final_content.trim() == "DONE" {
+        emit_progress(app, "done", 1, 1);
+        return Ok(());
+    }
+
     match status {
         Ok(true) => {
             emit_progress(app, "done", 1, 1);
@@ -544,10 +554,15 @@ pub fn run_flash_worker(args: &[String]) {
 
     match do_flash(image, bmap_opt, target, report) {
         Ok(()) => {
+            log("flash-worker: OK");
             let _ = fs::write(progress, "DONE");
             std::process::exit(0);
         }
         Err(e) => {
+            // Also to the log: the progress file is deleted as soon as the GUI
+            // has read it, so this is otherwise the one piece of evidence that
+            // does not survive the run.
+            log(&format!("flash-worker: ERR {e}"));
             let _ = fs::write(progress, format!("ERR {e}"));
             std::process::exit(1);
         }

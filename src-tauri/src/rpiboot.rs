@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use tauri::{AppHandle, Manager};
 
@@ -29,6 +30,11 @@ use crate::sim;
 /// Guards against launching several rpiboot runs at once (the frontend polls
 /// detection every ~1.5s, so download mode would otherwise fire repeatedly).
 static RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// How long to wait for the eMMC to enumerate after rpiboot runs. The CM4
+/// reboots into the mass-storage gadget, so a few seconds is normal.
+const PREPARE_POLLS: u32 = 40;
+const PREPARE_POLL_DELAY: Duration = Duration::from_millis(500);
 
 fn bin_name() -> &'static str {
     if cfg!(target_os = "windows") {
@@ -154,7 +160,34 @@ fn run_rpiboot(app: &AppHandle) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let (bin, dir) = stage_artifacts_macos(app, &bin, &dir)?;
 
-    run_elevated_rpiboot(&bin, &dir)
+    let outcome = run_elevated_rpiboot(&bin, &dir);
+
+    // Trust the *effect*, not the exit status.
+    //
+    // Both elevated helpers are launched through a PowerShell shim, and what
+    // that shim reports back is a proxy for success at best: reading an
+    // elevated child's exit code from a non-elevated parent is not dependable,
+    // and rpiboot's own return value is not something we control either. But
+    // whether the eMMC actually appeared is unambiguous and is the only thing
+    // we care about - so wait for it, and only believe the failure if the
+    // storage never shows up.
+    for _ in 0..PREPARE_POLLS {
+        if let Some(dev) = crate::detect::detect_reachy() {
+            if dev.mode == "ready" {
+                return Ok(());
+            }
+        }
+        std::thread::sleep(PREPARE_POLL_DELAY);
+    }
+
+    match outcome {
+        Err(e) => Err(e),
+        // rpiboot claimed success but nothing appeared: that is a real failure,
+        // just not one rpiboot knew about.
+        Ok(()) => Err("rpiboot finished but the robot's storage never appeared. \
+                       Unplug and re-plug the USB cable (switch on DOWNLOAD), then try again."
+            .to_string()),
+    }
 }
 
 /// Copy the rpiboot binary and gadget dir into the app cache (outside the
