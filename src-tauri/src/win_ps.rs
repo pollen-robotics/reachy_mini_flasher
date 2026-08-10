@@ -27,12 +27,51 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// any non-English Windows.
 const EXIT_CANCELLED: i32 = 1223;
 
-/// A `powershell.exe -Command <script>` invocation, windowless.
+/// A windowless `powershell.exe` invocation running `script`.
+///
+/// The script is passed via `-EncodedCommand` rather than `-Command`. As plain
+/// text it has to survive two layers of command-line quoting - Rust's, then
+/// powershell.exe's own - and a script containing double quotes does **not**
+/// reliably come through intact. That silently stripped the quotes around a
+/// path containing a space, so `rpiboot` was invoked as
+/// `-d C:\Program` and exited immediately, having found no boot files.
+///
+/// Base64'd UTF-16LE has no such hazard: there is nothing in the encoded form
+/// for either parser to interpret, so the script arrives byte for byte.
 pub fn command(script: &str) -> Command {
     let mut cmd = Command::new("powershell");
-    cmd.args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .creation_flags(CREATE_NO_WINDOW);
+    cmd.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-EncodedCommand",
+        &encode_command(script),
+    ])
+    .creation_flags(CREATE_NO_WINDOW);
     cmd
+}
+
+/// Encode a script the way `-EncodedCommand` expects: UTF-16LE, then base64.
+fn encode_command(script: &str) -> String {
+    let mut bytes = Vec::with_capacity(script.len() * 2);
+    for unit in script.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    base64_encode(&bytes)
+}
+
+/// Minimal standard base64. Avoids a dependency for one call site.
+fn base64_encode(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        out.push(TABLE[(n >> 18) as usize & 0x3f] as char);
+        out.push(TABLE[(n >> 12) as usize & 0x3f] as char);
+        out.push(if chunk.len() > 1 { TABLE[(n >> 6) as usize & 0x3f] as char } else { '=' });
+        out.push(if chunk.len() > 2 { TABLE[n as usize & 0x3f] as char } else { '=' });
+    }
+    out
 }
 
 /// Run a script and return its stdout. `what` names the operation in errors.
@@ -125,6 +164,17 @@ mod tests {
     #[derive(serde::Deserialize, PartialEq, Debug)]
     struct Row {
         n: u32,
+    }
+
+    #[test]
+    fn encodes_commands_as_utf16le_base64() {
+        // What `powershell -EncodedCommand` expects. Verified against
+        // `[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('...'))`.
+        assert_eq!(super::encode_command("A"), "QQA=");
+        assert_eq!(super::encode_command("AB"), "QQBCAA==");
+        assert_eq!(super::encode_command("ABC"), "QQBCAEMA");
+        // The case that broke rpiboot: a script carrying a quoted path.
+        assert_eq!(super::encode_command("\"a b\""), "IgBhACAAYgAiAA==");
     }
 
     #[test]
