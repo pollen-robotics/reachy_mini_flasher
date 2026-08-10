@@ -9,9 +9,10 @@ few concrete gaps remain before it can be considered working. This document
 tracks them.
 
 > **TL;DR** - macOS is release-ready (see `.github/workflows/release-macos.yml`).
-> Items **#2 (driver)** and **#3 (volume lock)** are now implemented; **#1
-> (bundling)** and **#4 (disk signature)** remain, and nothing here has been run
-> against real hardware yet.
+> All four items are now implemented. On Windows, everything **up to and
+> including exposing the eMMC** has been confirmed on real hardware (a Reachy
+> Mini Wireless on Windows 11): the driver binds, rpiboot runs, and the disk is
+> detected. The **flash itself - item #3's volume lock - is still unverified.**
 
 ---
 
@@ -19,12 +20,12 @@ tracks them.
 
 | Concern | Where | Status |
 |---|---|---|
-| Disk enumeration | `src-tauri/src/disks.rs` (`Get-Disk` via PowerShell, `\\.\PhysicalDriveN`, filters system disk) | ✅ implemented |
+| Disk enumeration | `src-tauri/src/disks.rs` (`Get-Disk` via PowerShell, `\\.\PhysicalDriveN`, filters system disk) | ✅ confirmed on hardware |
 | Download-mode detection | `src-tauri/src/detect.rs` (`nusb`, Broadcom VID `0x0a5c`, + PnP fallback) | ✅ implemented |
-| WinUSB driver binding | `src-tauri/src/win_driver.rs` (libwdi `wdi-simple.exe`, in-app) | ⚠️ implemented, untested |
-| Volume lock / dismount | `src-tauri/src/win_volume.rs` (FSCTL lock + dismount + delete layout) | ⚠️ implemented, untested |
+| WinUSB driver binding | `src-tauri/src/win_driver.rs` (libwdi `wdi-simple.exe`, in-app) | ✅ confirmed on hardware |
+| Volume lock / dismount | `src-tauri/src/win_volume.rs` (FSCTL lock + dismount + delete layout) | ⚠️ implemented, **still untested** |
 | Elevated flashing | `src-tauri/src/flash.rs` (`Start-Process -Verb RunAs` → `flash-worker`, `SectorWriter` block alignment) | ⚠️ implemented, untested |
-| Elevated rpiboot | `src-tauri/src/rpiboot.rs` (`Start-Process -Verb RunAs`) | ⚠️ implemented, needs bundling |
+| Elevated rpiboot | `src-tauri/src/rpiboot.rs` (`Start-Process -Verb RunAs`) | ✅ confirmed on hardware |
 | Bundle targets | `src-tauri/tauri.conf.json` (`msi`, `nsis`) | ✅ configured |
 | Compile coverage | `.github/workflows/ci.yml` (`rust-windows` job) | ✅ clippy + tests on `windows-latest` |
 
@@ -56,7 +57,7 @@ real flash fail regardless of the items below:
 
 ## Remaining work
 
-### 1. Bundle `rpiboot.exe` + `mass-storage-gadget64` - ✅ implemented (needs one CI run to confirm)
+### 1. Bundle `rpiboot.exe` + `mass-storage-gadget64` - ✅ confirmed on hardware
 
 `scripts/fetch-rpiboot.sh` is bash-only and builds `rpiboot` from source. On
 Windows there is no build worth doing: `rpiboot.exe` is a prebuilt **Cygwin**
@@ -99,7 +100,7 @@ existing RPiBoot installation (`HKCU\Software\Raspberry Pi`, else
 `%ProgramFiles%\Raspberry Pi`), so a machine that ran the official installer
 works without any bundling at all.
 
-### 2. WinUSB driver for the CM4 - ✅ implemented (untested on hardware)
+### 2. WinUSB driver for the CM4 - ✅ confirmed on hardware
 
 In download mode the CM4 enumerates as a Broadcom USB device. On Windows it is
 **not usable until a WinUSB driver is bound to it**. Without it:
@@ -112,7 +113,7 @@ Raspberry Pi's own `rpiboot_setup.exe`: run **libwdi**'s `wdi-simple.exe` to bin
 WinUSB to the device.
 
 ```
-wdi-simple.exe -n "Raspberry Pi USB boot" -v 0x0a5c -p 0x2711 -t 0
+wdi-simple.exe -n "Raspberry Pi USB boot" -v 0x0a5c -p 0x2711 -t 0 -d <abs path>
 ```
 
 - Only `0x2711` (BCM2711, the CM4) is bound. Upstream binds all four boot PIDs
@@ -130,6 +131,24 @@ wdi-simple.exe -n "Raspberry Pi USB boot" -v 0x0a5c -p 0x2711 -t 0
 
 Still needs consent (a UAC prompt plus Windows' driver dialog) - that part is
 irreducible, but it is now one click inside the app.
+
+> [!IMPORTANT]
+> **`-d <absolute path>` is not optional.** libwdi resolves its extraction
+> directory relative to its *own executable*, not to the process working
+> directory, so `Start-Process -WorkingDirectory` has no effect on it. Without
+> `-d` it writes `usb_driver/` into the app's folder under Program Files - and
+> because libwdi **refuses to reuse an existing extraction directory** (it calls
+> `CreateDirectory`, gets `ERROR_ALREADY_EXISTS`, and fails the whole install
+> with `WDI_ERROR_ACCESS` / `-3`), a single failed run permanently breaks every
+> later attempt, in a folder that needs admin rights to clean up.
+>
+> The directory is therefore removed before each run and deliberately **not**
+> recreated - libwdi wants to create it itself.
+
+Confirmed on a Reachy Mini Wireless: `PID_2711` is what the CM4 enumerates as
+(so the single-PID choice above is right), the device reports
+`CM_PROB_FAILED_INSTALL` / Code 28 beforehand, and afterwards
+`Service : WinUSB` with `Status : OK` - surviving a re-plug.
 
 ### 3. Raw-disk writes need volume lock / dismount - ✅ implemented (untested on hardware)
 
@@ -155,15 +174,29 @@ Uses the `windows` crate (target-gated in `Cargo.toml`). A volume that refuses t
 dismount fails the flash with a message naming the cause, rather than corrupting
 the write.
 
-### 4. Verify the exposed-eMMC disk description
+### 4. Verify the exposed-eMMC disk description - ✅ confirmed, no change needed
 
-`detect.rs::looks_like_reachy_disk` matches on the disk description. The
-signatures (`mmcblk`, `file-stor`, `rpi-msd`, …) were observed on macOS. On
-Windows, `Get-Disk`'s `FriendlyName` for the same gadget may differ.
+`detect.rs::looks_like_reachy_disk` matches on the disk description, and the
+signatures (`mmcblk`, `file-stor`, `rpi-msd`, …) were all observed on macOS - so
+there was no reason to assume Windows would report the same thing.
 
-**TODO:** plug a CM4 in download mode on Windows, run
-`Get-Disk | Select Number,FriendlyName,BusType`, and add the observed
-`FriendlyName` to `looks_like_reachy_disk` if it isn't already matched.
+**It does.** Measured on a Reachy Mini Wireless (CM4) attached to Windows 11,
+after rpiboot exposed the eMMC:
+
+```
+Number FriendlyName       BusType          Size
+------ ------------       -------          ----
+     0 WD Blue SN5000 2TB NVMe    2000398934016
+     1 mmcblk0            USB         15634268160
+```
+
+`mmcblk0` is already matched by the existing `mmcblk` signature, so **no code
+change is needed**. The rest lines up too: `BusType USB` marks it external and
+removable, and it is neither the boot nor the system disk, so it survives the
+filter in `disks.rs` as `\\.\PhysicalDrive1`.
+
+Worth keeping in mind that this is one sample from one machine. If a future
+board or gadget version reports something else, this is the list to extend.
 
 ---
 
