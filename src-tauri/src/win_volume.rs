@@ -30,10 +30,12 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_NO_MORE_FILES, HANDLE};
+use windows::Win32::Foundation::{
+    CloseHandle, GetLastError, ERROR_NO_MORE_FILES, GENERIC_READ, GENERIC_WRITE, HANDLE,
+};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FindFirstVolumeW, FindNextVolumeW, FindVolumeClose, FILE_ATTRIBUTE_NORMAL,
-    FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows::Win32::System::Ioctl::{
     FSCTL_DISMOUNT_VOLUME, FSCTL_LOCK_VOLUME, IOCTL_DISK_DELETE_DRIVE_LAYOUT,
@@ -74,13 +76,18 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// Access mask for merely *identifying* a device.
+///
+/// `dwDesiredAccess = 0` grants no read or write rights but still allows the
+/// query ioctls, and - crucially - succeeds on volumes that would refuse a
+/// read/write open. Identifying a volume must never require the right to
+/// modify it, or the ones we most need to find are the ones we skip.
+const ACCESS_QUERY: u32 = 0;
+/// Access mask required to lock and dismount a volume.
+const ACCESS_RW: u32 = GENERIC_READ.0 | GENERIC_WRITE.0;
+
 /// Open a device path (`\\.\PhysicalDriveN`, `\\?\Volume{...}`) for raw access.
-fn open_device(path: &str, write: bool) -> Result<OwnedHandle, String> {
-    let access = if write {
-        FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0
-    } else {
-        FILE_GENERIC_READ.0
-    };
+fn open_device(path: &str, access: u32) -> Result<OwnedHandle, String> {
     let wpath = wide(path);
     let handle = unsafe {
         CreateFileW(
@@ -196,7 +203,7 @@ impl Drop for DiskLock {
         // partition table we just wrote, so the robot's boot partition shows up
         // instead of the stale (deleted) layout.
         let path = format!("\\\\.\\PhysicalDrive{}", self.disk_number);
-        if let Ok(disk) = open_device(&path, true) {
+        if let Ok(disk) = open_device(&path, ACCESS_RW) {
             if let Err(e) = ioctl_void(&disk, IOCTL_DISK_UPDATE_PROPERTIES) {
                 eprintln!("IOCTL_DISK_UPDATE_PROPERTIES on {path} failed: {e}");
             }
@@ -215,27 +222,42 @@ pub fn lock_disk(target: &str) -> Result<Option<DiskLock>, String> {
 
     let mut locked = Vec::new();
     for volume in all_volumes()? {
-        // Opened read/write: FSCTL_LOCK_VOLUME requires write access.
-        let Ok(handle) = open_device(&volume, true) else {
-            // An empty card reader slot, a volume that just went away - not ours
-            // to care about. Only volumes on the *target* disk matter, and those
-            // are openable.
+        // Identify with a query-only handle. Opening every volume on the system
+        // read/write just to read its disk number is both rude and unreliable:
+        // the system volume and various pseudo-volumes refuse it, and silently
+        // skipping whatever refuses means silently skipping the robot's own
+        // volumes too if they ever do - which is the one case that must not be
+        // skipped, because leaving one mounted makes Windows deny the writes
+        // partway into the flash.
+        let Ok(probe) = open_device(&volume, ACCESS_QUERY) else {
             continue;
         };
-        if volume_disk_number(&handle) != Some(disk_number) {
+        if volume_disk_number(&probe) != Some(disk_number) {
             continue;
         }
+        drop(probe);
 
+        // On the target disk. From here every failure is fatal: a volume we
+        // can't lock is a volume that stays mounted, and the flash would fail
+        // mid-write with a confusing ERROR_ACCESS_DENIED instead of a clear
+        // message now.
+        let handle = open_device(&volume, ACCESS_RW).map_err(|e| {
+            format!("Could not open {volume} on the robot's storage: {e}. Close any window browsing that drive and try again.")
+        })?;
         lock_and_dismount(&handle, &volume)?;
         locked.push(handle);
     }
+
+    // Zero volumes is legitimate (a disk with no recognizable filesystem), but
+    // it is also exactly what a broken enumeration looks like, so say which.
+    eprintln!("locked {} volume(s) on PhysicalDrive{disk_number}", locked.len());
 
     // With every volume locked and dismounted, drop the partition table so
     // Windows has nothing left to auto-mount while the image is written. Best
     // effort: on a disk that is already RAW there is no layout to delete, and
     // the write is fine either way.
     let disk_path = format!("\\\\.\\PhysicalDrive{disk_number}");
-    match open_device(&disk_path, true) {
+    match open_device(&disk_path, ACCESS_RW) {
         Ok(disk) => {
             if let Err(e) = ioctl_void(&disk, IOCTL_DISK_DELETE_DRIVE_LAYOUT) {
                 eprintln!("IOCTL_DISK_DELETE_DRIVE_LAYOUT on {disk_path} failed: {e}");
