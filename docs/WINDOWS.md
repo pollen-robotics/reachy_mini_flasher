@@ -4,17 +4,15 @@ The flasher is written to be cross-platform and **already has Windows code paths
 for every OS-specific operation**. It compiles on Windows and produces `.msi` /
 `.nsis` installers, and the **simulation flow** (`REACHY_FLASHER_SIM=1`) works.
 
-A full flash **has** now been performed on Windows and the robot booted, so the
-approach is sound end to end. What is not yet proven is that it works without
-manual intervention - see the TL;DR. This document tracks the remaining gap and
-records what was measured.
+A Reachy Mini Wireless has been flashed from Windows 11, start to finish,
+entirely from the app - and it booted afterwards. This document records what was
+measured and what had to be fixed to get there.
 
-> **TL;DR** - macOS is release-ready (see `.github/workflows/release-macos.yml`).
-> All four items are implemented, and **the whole path has been run on real
-> hardware**: a Reachy Mini Wireless flashed from Windows 11 boots afterwards.
-> One caveat - that run needed `Clear-Disk` by hand to drop the mounted volume,
-> because item #3's lock was skipping it. That bug is fixed but **the fix has
-> not been retested on hardware yet**, so an unaided flash is still unproven.
+> **TL;DR** - all four items are implemented and **confirmed on real hardware**.
+> The app installs the USB driver, runs rpiboot, detects the eMMC, locks the
+> volumes and writes the image with no manual steps, and the robot boots. What
+> remains is packaging polish, not function: the installers are unsigned, and no
+> Windows release has been tagged yet.
 
 ---
 
@@ -23,10 +21,10 @@ records what was measured.
 | Concern | Where | Status |
 |---|---|---|
 | Disk enumeration | `src-tauri/src/disks.rs` (`Get-Disk` via PowerShell, `\\.\PhysicalDriveN`, filters system disk) | ✅ confirmed on hardware |
-| Download-mode detection | `src-tauri/src/detect.rs` (`nusb`, Broadcom VID `0x0a5c`, + PnP fallback) | ✅ implemented |
+| Download-mode detection | `src-tauri/src/detect.rs` (`nusb`, Broadcom VID `0x0a5c`, + PnP fallback) | ✅ confirmed on hardware |
 | WinUSB driver binding | `src-tauri/src/win_driver.rs` (libwdi `wdi-simple.exe`, in-app) | ✅ confirmed on hardware |
-| Volume lock / dismount | `src-tauri/src/win_volume.rs` (FSCTL lock + dismount + delete layout) | ⚠️ implemented, **still untested** |
-| Elevated flashing | `src-tauri/src/flash.rs` (`Start-Process -Verb RunAs` → `flash-worker`, `SectorWriter` block alignment) | ⚠️ implemented, untested |
+| Volume lock / dismount | `src-tauri/src/win_volume.rs` (FSCTL lock + dismount) | ✅ confirmed on hardware |
+| Elevated flashing | `src-tauri/src/flash.rs` (`Start-Process -Verb RunAs` → `flash-worker`, `SectorWriter` block alignment) | ✅ confirmed on hardware |
 | Elevated rpiboot | `src-tauri/src/rpiboot.rs` (`Start-Process -Verb RunAs`) | ✅ confirmed on hardware |
 | Bundle targets | `src-tauri/tauri.conf.json` (`msi`, `nsis`) | ✅ configured |
 | Compile coverage | `.github/workflows/ci.yml` (`rust-windows` job) | ✅ clippy + tests on `windows-latest` |
@@ -37,10 +35,50 @@ new information, not a baseline.
 
 ---
 
-## Bugs found while implementing #2/#3
+## Bugs found on real hardware
 
-Three defects in the pre-existing Windows paths, all of which would have made a
-real flash fail regardless of the items below:
+Everything below compiled, passed clippy and passed CI while being completely
+broken. None of it was reachable without a robot on a real Windows machine.
+
+**`\\?\` paths silently break every external program.** Tauri's
+`resource_dir()` returns extended-length ("verbatim") paths on Windows, so the
+app was invoking `cmd.exe /c ""\\?\C:\Program Files\...\rpiboot.exe" ..."`.
+`cmd.exe` rejects that prefix outright, and rpiboot - a Cygwin binary - could not
+find its boot files and exited instantly. This produced hours of misdiagnosis,
+because the failure looked like everything except what it was. Any path leaving
+the process for another program must go through `win_ps::simplify`. Note `\\.\`
+device paths are a *different* prefix and must be left intact.
+
+**Deleting the partition table voids your own volume locks.**
+`IOCTL_DISK_DELETE_DRIVE_LAYOUT` makes Windows re-read the layout, which tears
+down the volume objects and builds new ones - so locks taken moments earlier are
+silently void, and the replacement volume is mounted and unlocked. Symptom:
+`locked 1 volume(s)` followed by `failed to flush: Access is denied (os error
+5)`. Lock and dismount is the documented requirement and is sufficient alone.
+
+**Identifying a volume must not require write access.** The lock loop opened
+every volume read/write and skipped whatever refused - so the volume it most
+needed to lock was the one it silently skipped, nothing got locked, and the
+write died partway through.
+
+**libwdi ignores the working directory.** It resolves its extraction directory
+against its own executable, so it wrote into Program Files - and it refuses to
+reuse an existing one (`ERROR_ALREADY_EXISTS` -> `WDI_ERROR_ACCESS`), so one
+failed run permanently broke every retry. Always pass `-d <absolute path>`.
+
+**Elevated helpers have nowhere to report to.** The flash worker is a separate
+elevated process and the release build is a `windows` subsystem binary: no
+console, stderr inherited by nothing. Every `eprintln!` vanished. Until the log
+file existed, every diagnosis was guesswork - and two consecutive theories were
+wrong because of it. **Instrument first.**
+
+**An error message that swallows the real one is worse than none.**
+`humanizeError` matched "usb driver" and rewrote a failed install - exit code
+and all - into generic "install a driver" guidance, re-rendering the screen the
+user had just acted on.
+
+Plus three defects in the pre-existing Windows paths, all of which would have
+made a real flash fail regardless:
 
 - **`disks.rs` used `ConvertTo-Json -AsArray`.** That parameter only exists in
   PowerShell 6+; `powershell.exe` on Windows 10/11 is Windows PowerShell 5.1,
