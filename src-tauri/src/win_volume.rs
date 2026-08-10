@@ -172,7 +172,7 @@ fn all_volumes() -> Result<Vec<String>, String> {
             // ERROR_NO_MORE_FILES is the normal end of enumeration.
             let last = unsafe { GetLastError() };
             if last != ERROR_NO_MORE_FILES {
-                eprintln!("volume enumeration stopped early: {last:?}");
+                crate::flash::log(&format!("volume enumeration stopped early: {last:?}"));
             }
             break;
         }
@@ -205,7 +205,7 @@ impl Drop for DiskLock {
         let path = format!("\\\\.\\PhysicalDrive{}", self.disk_number);
         if let Ok(disk) = open_device(&path, ACCESS_RW) {
             if let Err(e) = ioctl_void(&disk, IOCTL_DISK_UPDATE_PROPERTIES) {
-                eprintln!("IOCTL_DISK_UPDATE_PROPERTIES on {path} failed: {e}");
+                crate::flash::log(&format!("IOCTL_DISK_UPDATE_PROPERTIES on {path} failed: {e}"));
             }
         }
     }
@@ -229,10 +229,16 @@ pub fn lock_disk(target: &str) -> Result<Option<DiskLock>, String> {
         // volumes too if they ever do - which is the one case that must not be
         // skipped, because leaving one mounted makes Windows deny the writes
         // partway into the flash.
-        let Ok(probe) = open_device(&volume, ACCESS_QUERY) else {
-            continue;
+        let probe = match open_device(&volume, ACCESS_QUERY) {
+            Ok(p) => p,
+            Err(e) => {
+                crate::flash::log(&format!("skip {volume}: cannot open to identify ({e})"));
+                continue;
+            }
         };
-        if volume_disk_number(&probe) != Some(disk_number) {
+        let on_disk = volume_disk_number(&probe);
+        crate::flash::log(&format!("volume {volume} -> disk {on_disk:?}"));
+        if on_disk != Some(disk_number) {
             continue;
         }
         drop(probe);
@@ -250,7 +256,7 @@ pub fn lock_disk(target: &str) -> Result<Option<DiskLock>, String> {
 
     // Zero volumes is legitimate (a disk with no recognizable filesystem), but
     // it is also exactly what a broken enumeration looks like, so say which.
-    eprintln!("locked {} volume(s) on PhysicalDrive{disk_number}", locked.len());
+    crate::flash::log(&format!("locked {} volume(s) on PhysicalDrive{disk_number}", locked.len()));
 
     // With every volume locked and dismounted, drop the partition table so
     // Windows has nothing left to auto-mount while the image is written. Best
@@ -260,10 +266,10 @@ pub fn lock_disk(target: &str) -> Result<Option<DiskLock>, String> {
     match open_device(&disk_path, ACCESS_RW) {
         Ok(disk) => {
             if let Err(e) = ioctl_void(&disk, IOCTL_DISK_DELETE_DRIVE_LAYOUT) {
-                eprintln!("IOCTL_DISK_DELETE_DRIVE_LAYOUT on {disk_path} failed: {e}");
+                crate::flash::log(&format!("IOCTL_DISK_DELETE_DRIVE_LAYOUT on {disk_path} failed: {e}"));
             }
         }
-        Err(e) => eprintln!("could not open {disk_path} to clear its layout: {e}"),
+        Err(e) => crate::flash::log(&format!("could not open {disk_path} to clear its layout: {e}")),
     }
 
     Ok(Some(DiskLock { disk_number, _volumes: locked }))
@@ -296,7 +302,7 @@ fn lock_and_dismount(handle: &OwnedHandle, volume: &str) -> Result<(), String> {
     match (locked, dismounted) {
         (true, Ok(())) => Ok(()),
         (false, Ok(())) => {
-            eprintln!("{volume}: dismounted but could not be locked ({last_err})");
+            crate::flash::log(&format!("{volume}: dismounted but could not be locked ({last_err})"));
             Ok(())
         }
         (_, Err(e)) => Err(format!(

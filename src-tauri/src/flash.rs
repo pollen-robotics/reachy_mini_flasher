@@ -492,6 +492,31 @@ fn run_elevated(_: &Path, _: &str, _: &str, _: &str, _: &str) -> Result<bool, St
     Err("elevated flashing is only implemented for macOS and Windows".to_string())
 }
 
+/// Diagnostics file for the elevated worker.
+///
+/// The worker is a separate elevated process launched through
+/// `Start-Process -Verb RunAs`, and the release build is a `windows` subsystem
+/// binary - so it has no console, and its stderr is not inherited by anything.
+/// Every `eprintln!` in the flash path therefore goes nowhere, which makes a
+/// failure on a user's machine essentially undebuggable. Route them to a file
+/// next to the progress file instead.
+static LOG_PATH: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+
+/// Append a diagnostic line to the worker log (no-op outside the worker).
+pub fn log(msg: &str) {
+    eprintln!("{msg}");
+    let guard = match LOG_PATH.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some(path) = guard.as_ref() {
+        use std::io::Write as _;
+        if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(f, "{msg}");
+        }
+    }
+}
+
 /// Entry point for the elevated child process (`flash-worker`).
 /// Args: <image> <bmap|-> <target> <progress_file>
 pub fn run_flash_worker(args: &[String]) {
@@ -501,6 +526,16 @@ pub fn run_flash_worker(args: &[String]) {
     }
     let (image, bmap, target, progress) = (&args[0], &args[1], &args[2], &args[3]);
     let bmap_opt = if bmap == "-" { None } else { Some(bmap.as_str()) };
+
+    // Start the diagnostics file before anything can fail.
+    {
+        let path = std::path::PathBuf::from(format!("{progress}.log"));
+        let _ = fs::remove_file(&path);
+        if let Ok(mut guard) = LOG_PATH.lock() {
+            *guard = Some(path);
+        }
+    }
+    log(&format!("flash-worker target={target} image={image} bmap={bmap}"));
 
     let progress_path = progress.clone();
     let report: Box<dyn FnMut(u64, u64) + Send> = Box::new(move |w, t| {
