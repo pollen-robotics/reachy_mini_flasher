@@ -16,6 +16,7 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 use tauri::AppHandle;
 
@@ -88,24 +89,9 @@ pub fn resolve_image(app: &AppHandle) -> Result<ResolvedImage, String> {
 
     match fetch_latest_release(&client) {
         Ok(rel) => {
-            let image_path = dir.join(&rel.img_name);
-            if image_path.exists() {
-                // Cache already holds exactly the latest asset - no download.
-                emit_download(app, &rel.version, 0, 0);
-                return Ok(ResolvedImage {
-                    image_path: image_path.to_string_lossy().to_string(),
-                    bmap_path: find_bmap(&dir),
-                });
-            }
-            // Empty cache or a stale (older) version: fetch the new image, then
-            // drop the old ones so we don't keep several ~1.7 GB files around.
             emit_download(app, &rel.version, 0, 0);
-            let resolved = download_release(app, &client, &dir, &rel)?;
-            let keep: Vec<&str> = std::iter::once(rel.img_name.as_str())
-                .chain(rel.bmap.as_ref().map(|(n, _)| n.as_str()))
-                .collect();
-            remove_stale_files(&dir, &keep);
-            Ok(resolved)
+            let report = |w: u64, t: u64| emit_download(app, &rel.version, w, t);
+            ensure_cached(&client, &dir, &rel, &report)
         }
         Err(net_err) => {
             // Offline / GitHub unreachable: reuse a cached image if we have one.
@@ -116,6 +102,47 @@ pub fn resolve_image(app: &AppHandle) -> Result<ResolvedImage, String> {
             Err(format!("could not fetch latest release (and no local image found): {net_err}"))
         }
     }
+}
+
+/// Serializes cache population. `resolve_image` has several concurrent callers
+/// (the startup prefetch, a re-prefetch after a remount/reload/Retry, and the
+/// flash itself), and they all download to the same `.part` path: racing them
+/// wastes a ~1.7 GB download, makes progress jump between two counters, and can
+/// publish a truncated image. Latecomers wait here, then take the cache hit.
+static CACHE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Make sure `dir` holds the assets described by `rel`, downloading them if the
+/// cache doesn't already have them, then drop older versions.
+///
+/// Decoupled from Tauri (progress goes through `report`) so the concurrency
+/// behaviour can be tested.
+fn ensure_cached(
+    client: &reqwest::blocking::Client,
+    dir: &Path,
+    rel: &ReleaseInfo,
+    report: &(dyn Fn(u64, u64) + Sync),
+) -> Result<ResolvedImage, String> {
+    // A poisoned lock just means a previous download panicked; the cache check
+    // below still tells us the truth, so recover instead of failing.
+    let _guard = CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let image_path = dir.join(&rel.img_name);
+    if image_path.exists() {
+        // Cache already holds exactly the latest asset - no download.
+        return Ok(ResolvedImage {
+            image_path: image_path.to_string_lossy().to_string(),
+            bmap_path: find_bmap(dir),
+        });
+    }
+
+    // Empty cache or a stale (older) version: fetch the new image, then
+    // drop the old ones so we don't keep several ~1.7 GB files around.
+    let resolved = download_release(client, dir, rel, report)?;
+    let keep: Vec<&str> = std::iter::once(rel.img_name.as_str())
+        .chain(rel.bmap.as_ref().map(|(n, _)| n.as_str()))
+        .collect();
+    remove_stale_files(dir, &keep);
+    Ok(resolved)
 }
 
 fn is_image_name(name: &str) -> bool {
@@ -235,17 +262,18 @@ fn fetch_latest_release(client: &reqwest::blocking::Client) -> Result<ReleaseInf
 
 /// Download the image (and bmap) described by `rel` into `dir`.
 fn download_release(
-    app: &AppHandle,
     client: &reqwest::blocking::Client,
     dir: &Path,
     rel: &ReleaseInfo,
+    report: &(dyn Fn(u64, u64) + Sync),
 ) -> Result<ResolvedImage, String> {
     let image_path = dir.join(&rel.img_name);
-    download_parallel(app, client, &rel.img_url, &image_path, &rel.version)?;
+    download_parallel(client, &rel.img_url, &image_path, report)?;
 
     let bmap_path = if let Some((bmap_name, bmap_url)) = &rel.bmap {
         let p = dir.join(bmap_name);
-        download_file(app, client, bmap_url, &p, &rel.version, false)?;
+        // The bmap is a few tens of KB: no progress worth reporting.
+        download_file(client, bmap_url, &p, &|_, _| {})?;
         Some(p.to_string_lossy().to_string())
     } else {
         None
@@ -283,18 +311,16 @@ fn remove_stale_files(dir: &Path, keep: &[&str]) {
 /// pull `DL_CHUNK`-sized chunks from a shared cursor and write each to its byte
 /// offset. Falls back to a single stream if the server ignores `Range`.
 fn download_parallel(
-    app: &AppHandle,
     client: &reqwest::blocking::Client,
     url: &str,
     dest: &Path,
-    version: &str,
+    report: &(dyn Fn(u64, u64) + Sync),
 ) -> Result<(), String> {
     let Some(total) = probe_total_with_ranges(client, url) else {
         // Ranges unsupported or size unknown: a single stream is the best we can do.
-        return download_file(app, client, url, dest, version, true);
+        return download_file(client, url, dest, report);
     };
-    let report = |w: u64, t: u64| emit_download(app, version, w, t);
-    download_ranged(client, url, dest, total, &report)
+    download_ranged(client, url, dest, total, report)
 }
 
 /// Core of the parallel downloader, decoupled from Tauri so it can be tested.
@@ -480,12 +506,10 @@ fn try_download_chunk(
 }
 
 fn download_file(
-    app: &AppHandle,
     client: &reqwest::blocking::Client,
     url: &str,
     dest: &Path,
-    version: &str,
-    report: bool,
+    report: &(dyn Fn(u64, u64) + Sync),
 ) -> Result<(), String> {
     // Always download fresh to a `.part`, then atomically rename. We do NOT
     // resume from an existing `.part`: a mismatched Range/redirect response can
@@ -513,8 +537,8 @@ fn download_file(
         }
         file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
         downloaded += n as u64;
-        if report && downloaded - last_emit >= 2 * 1024 * 1024 {
-            emit_download(app, version, downloaded, total);
+        if downloaded - last_emit >= 2 * 1024 * 1024 {
+            report(downloaded, total);
             last_emit = downloaded;
         }
     }
@@ -533,9 +557,7 @@ fn download_file(
         let _ = fs::remove_file(&part);
         format!("failed to finalize download: {e}")
     })?;
-    if report {
-        emit_download(app, version, downloaded, total);
-    }
+    report(downloaded, total);
     Ok(())
 }
 
@@ -575,18 +597,36 @@ mod tests {
 
     use std::io::{BufRead, BufReader};
     use std::net::TcpListener;
+    use std::time::Duration;
+
+    /// A running test server: its URL plus how many payload bytes it has served
+    /// (so a test can tell one download from two).
+    struct TestServer {
+        url: String,
+        served: std::sync::Arc<AtomicU64>,
+    }
 
     /// Minimal HTTP/1.1 server that honours `Range: bytes=a-b` (206 + a slice)
     /// and serves the whole blob otherwise (200). One thread per connection so
     /// parallel workers are served concurrently, mirroring GitHub/Azure.
-    fn spawn_range_server(data: Vec<u8>) -> String {
+    fn spawn_range_server(data: Vec<u8>) -> TestServer {
+        spawn_range_server_throttled(data, std::time::Duration::ZERO)
+    }
+
+    /// Same, but drip-feeds each response so a test can widen the window during
+    /// which a download is in flight.
+    fn spawn_range_server_throttled(data: Vec<u8>, per_64k: std::time::Duration) -> TestServer {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
+        let served = std::sync::Arc::new(AtomicU64::new(0));
+        let served_srv = served.clone();
         std::thread::spawn(move || {
             let data = std::sync::Arc::new(data);
+            let served = served_srv;
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { continue };
                 let data = data.clone();
+                let served = served.clone();
                 std::thread::spawn(move || {
                     let mut reader = BufReader::new(stream.try_clone().unwrap());
                     let mut range: Option<(u64, u64)> = None;
@@ -620,7 +660,15 @@ mod tests {
                                 slice.len()
                             );
                             let _ = stream.write_all(hdr.as_bytes());
-                            let _ = stream.write_all(slice);
+                            for piece in slice.chunks(64 * 1024) {
+                                if stream.write_all(piece).is_err() {
+                                    return;
+                                }
+                                served.fetch_add(piece.len() as u64, Ordering::Relaxed);
+                                if !per_64k.is_zero() {
+                                    std::thread::sleep(per_64k);
+                                }
+                            }
                         }
                         None => {
                             let hdr = format!(
@@ -628,13 +676,17 @@ mod tests {
                             );
                             let _ = stream.write_all(hdr.as_bytes());
                             let _ = stream.write_all(&data);
+                            served.fetch_add(total, Ordering::Relaxed);
                         }
                     }
                     let _ = stream.flush();
                 });
             }
         });
-        format!("http://{addr}/img")
+        TestServer {
+            url: format!("http://{addr}/img"),
+            served,
+        }
     }
 
     fn patterned_blob(len: usize) -> Vec<u8> {
@@ -675,9 +727,69 @@ mod tests {
     fn probe_reports_total_and_range_support() {
         let data = patterned_blob(3 * 1024 * 1024);
         let expected = data.len() as u64;
-        let url = spawn_range_server(data);
+        let srv = spawn_range_server(data);
         let client = reqwest::blocking::Client::new();
-        assert_eq!(probe_total_with_ranges(&client, &url), Some(expected));
+        assert_eq!(probe_total_with_ranges(&client, &srv.url), Some(expected));
+    }
+
+    /// A second resolve firing while the first is still downloading must not
+    /// start its own download of the same ~1.7 GB asset.
+    ///
+    /// This happens for real: the prefetch runs at mount, and a StrictMode
+    /// remount, a webview reload, the Retry button or a flash starting mid-
+    /// prefetch all call in again. Both downloads share one `.part` path, so
+    /// besides wasting bandwidth (and making the progress bar jump between two
+    /// counters) the second `create` + `set_len` truncates the first's work,
+    /// and whoever renames first can publish a sparse, half-written image.
+    #[test]
+    fn second_resolve_during_download_reuses_the_first() {
+        // Throttled so the first download is still in flight when the second
+        // one fires - the window that exists in the app.
+        let expected = patterned_blob(40 * 1024 * 1024 + 12_345);
+        let total = expected.len() as u64;
+        let srv = spawn_range_server_throttled(expected.clone(), Duration::from_millis(2));
+
+        let dir = std::env::temp_dir().join(format!("rmf-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let rel = ReleaseInfo {
+            version: "v0.0.1-test".into(),
+            img_name: "image-test.zip".into(),
+            img_url: srv.url.clone(),
+            bmap: None,
+        };
+        let dest = dir.join(&rel.img_name);
+        let part = dest.with_extension("part");
+
+        let report = |_w: u64, _t: u64| {};
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let client = reqwest::blocking::Client::new();
+                ensure_cached(&client, &dir, &rel, &report).expect("first resolve ok");
+            });
+            scope.spawn(|| {
+                // Wait until the first download is provably in flight.
+                while !part.exists() && !dest.exists() {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                let client = reqwest::blocking::Client::new();
+                ensure_cached(&client, &dir, &rel, &report).expect("second resolve ok");
+            });
+        });
+
+        let served = srv.served.load(Ordering::Relaxed);
+        assert!(
+            served < total + total / 2,
+            "asset was downloaded more than once: served {served} bytes for a {total}-byte image"
+        );
+
+        let got = std::fs::read(&dest).expect("an image should have been published");
+        assert_eq!(got.len(), expected.len(), "published image has wrong size");
+        assert!(got == expected, "published image is corrupt (raced writers)");
+        assert!(!part.exists(), "leftover .part file");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -686,7 +798,8 @@ mod tests {
         // exercising multi-worker assembly and offset correctness.
         let expected = patterned_blob(40 * 1024 * 1024 + 12_345);
         let total = expected.len() as u64;
-        let url = spawn_range_server(expected.clone());
+        let srv = spawn_range_server(expected.clone());
+        let url = srv.url.clone();
         let client = reqwest::blocking::Client::new();
 
         let dir = std::env::temp_dir().join(format!("rmf-dltest-{}", std::process::id()));

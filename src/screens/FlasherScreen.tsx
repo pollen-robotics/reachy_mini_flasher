@@ -474,7 +474,10 @@ export function FlasherScreen() {
   useEffect(() => {
     const unlisten = onFlashProgress((p) => {
       if (p.phase === 'downloading') {
-        setImageProgress(p);
+        // A `total` of 0 is a version-only announcement (emitted before the
+        // size is known); keeping it out of the progress state avoids knocking
+        // an in-flight percentage back to "connecting".
+        if (p.total > 0) setImageProgress(p);
         if (p.version) setOsVersion(p.version);
       } else {
         setProgress(p);
