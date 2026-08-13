@@ -65,10 +65,15 @@ fn in_download_mode() -> bool {
     // nusb 0.2 returns a `MaybeFuture`; resolve it synchronously with `.wait()`
     // since detection runs on a blocking Tauri command.
     use nusb::MaybeFuture;
-    match nusb::list_devices().wait() {
+    let seen_by_nusb = match nusb::list_devices().wait() {
         Ok(devices) => devices.into_iter().any(|d| d.vendor_id() == BROADCOM_VID),
         Err(_) => false,
-    }
+    };
+    // On Windows nusb only enumerates devices with a user-mode driver bound, so
+    // a CM4 whose WinUSB driver isn't installed yet is invisible here - which
+    // would look exactly like "no robot plugged in". Ask the PnP tree instead,
+    // so the UI can offer to install the driver. No-op on other platforms.
+    seen_by_nusb || crate::win_driver::device_present()
 }
 
 /// Returns the currently connected Reachy, if any.

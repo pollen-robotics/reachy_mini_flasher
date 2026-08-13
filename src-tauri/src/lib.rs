@@ -5,6 +5,14 @@ mod flash;
 mod images;
 mod rpiboot;
 mod sim;
+mod win_driver;
+
+// Windows-only support modules: PowerShell plumbing (also used for elevation)
+// and the volume lock/dismount dance a raw disk write needs there.
+#[cfg(target_os = "windows")]
+mod win_ps;
+#[cfg(target_os = "windows")]
+mod win_volume;
 
 use app_update::AppUpdateStore;
 
@@ -42,6 +50,8 @@ pub fn run() {
             rpiboot::prepare_reachy,
             images::prefetch_image,
             flash::flash_reachy,
+            win_driver::winusb_status,
+            win_driver::install_winusb_driver,
             open_url,
             app_update::get_app_update_info,
             app_update::install_app_update

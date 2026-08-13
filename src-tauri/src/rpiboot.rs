@@ -16,8 +16,12 @@
 //! Resolved from (in order): env overrides, bundled resources, then $PATH.
 
 use std::path::{Path, PathBuf};
+// Only the macOS path shells out directly; Windows elevation goes through
+// `win_ps::run_elevated`.
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use tauri::{AppHandle, Manager};
 
@@ -26,6 +30,11 @@ use crate::sim;
 /// Guards against launching several rpiboot runs at once (the frontend polls
 /// detection every ~1.5s, so download mode would otherwise fire repeatedly).
 static RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// How long to wait for the eMMC to enumerate after rpiboot runs. The CM4
+/// reboots into the mass-storage gadget, so a few seconds is normal.
+const PREPARE_POLLS: u32 = 40;
+const PREPARE_POLL_DELAY: Duration = Duration::from_millis(500);
 
 fn bin_name() -> &'static str {
     if cfg!(target_os = "windows") {
@@ -56,6 +65,15 @@ fn rpiboot_bin(app: &AppHandle) -> Option<PathBuf> {
             return Some(cand);
         }
     }
+    // Windows: reuse an existing RPiBoot installation. It's what we point users
+    // at for the WinUSB driver, and it brings rpiboot.exe along with it.
+    #[cfg(target_os = "windows")]
+    if let Some(dir) = crate::win_driver::rpiboot_install_dir() {
+        let cand = dir.join(bin_name());
+        if cand.is_file() {
+            return Some(cand);
+        }
+    }
     find_on_path(bin_name())
 }
 
@@ -70,6 +88,13 @@ fn gadget_dir(app: &AppHandle) -> Option<PathBuf> {
     if let Ok(res) = app.path().resource_dir() {
         let cand = res.join("rpiboot").join("mass-storage-gadget64");
         if cand.exists() {
+            return Some(cand);
+        }
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(dir) = crate::win_driver::rpiboot_install_dir() {
+        let cand = dir.join("mass-storage-gadget64");
+        if cand.is_dir() {
             return Some(cand);
         }
     }
@@ -109,6 +134,14 @@ pub async fn prepare_reachy(app: AppHandle) -> Result<(), String> {
 }
 
 fn run_rpiboot(app: &AppHandle) -> Result<(), String> {
+    // Windows: with no WinUSB driver bound to the CM4, rpiboot can't open the
+    // device at all. Say so up front - the UI turns this into an "install the
+    // driver" action - instead of letting rpiboot fail with a generic error.
+    #[cfg(target_os = "windows")]
+    if let Some(reason) = crate::win_driver::blocking_reason(app) {
+        return Err(reason);
+    }
+
     let bin = rpiboot_bin(app).ok_or_else(|| {
         "rpiboot was not found. Install it (see README) or set REACHY_RPIBOOT_BIN.".to_string()
     })?;
@@ -127,7 +160,34 @@ fn run_rpiboot(app: &AppHandle) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let (bin, dir) = stage_artifacts_macos(app, &bin, &dir)?;
 
-    run_elevated_rpiboot(&bin, &dir)
+    let outcome = run_elevated_rpiboot(&bin, &dir);
+
+    // Trust the *effect*, not the exit status.
+    //
+    // Both elevated helpers are launched through a PowerShell shim, and what
+    // that shim reports back is a proxy for success at best: reading an
+    // elevated child's exit code from a non-elevated parent is not dependable,
+    // and rpiboot's own return value is not something we control either. But
+    // whether the eMMC actually appeared is unambiguous and is the only thing
+    // we care about - so wait for it, and only believe the failure if the
+    // storage never shows up.
+    for _ in 0..PREPARE_POLLS {
+        if let Some(dev) = crate::detect::detect_reachy() {
+            if dev.mode == "ready" {
+                return Ok(());
+            }
+        }
+        std::thread::sleep(PREPARE_POLL_DELAY);
+    }
+
+    match outcome {
+        Err(e) => Err(e),
+        // rpiboot claimed success but nothing appeared: that is a real failure,
+        // just not one rpiboot knew about.
+        Ok(()) => Err("rpiboot finished but the robot's storage never appeared. \
+                       Unplug and re-plug the USB cable (switch on DOWNLOAD), then try again."
+            .to_string()),
+    }
 }
 
 /// Copy the rpiboot binary and gadget dir into the app cache (outside the
@@ -220,21 +280,46 @@ fn run_elevated_rpiboot(bin: &Path, dir: &Path) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn run_elevated_rpiboot(bin: &Path, dir: &Path) -> Result<(), String> {
-    let ps = format!(
-        "$p = Start-Process -FilePath '{}' -ArgumentList '-d','{}' -Verb RunAs -Wait -PassThru; exit $p.ExitCode",
-        bin.to_string_lossy(),
-        dir.to_string_lossy()
-    );
-    let out = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
-        .output()
-        .map_err(|e| format!("failed to request privileges: {e}"))?;
+    // rpiboot's console belongs to the elevated child and vanishes the instant
+    // it exits, taking with it the only thing that ever explains a failure. And
+    // `Start-Process -Verb RunAs` cannot be combined with output redirection -
+    // they are different parameter sets - so route it through `cmd.exe`, whose
+    // redirection lands the output in a file we can read back.
+    //
+    // This is not just for debugging: the tail of that output is what the user
+    // gets told, instead of a bare exit code that says nothing.
+    let out_file = std::env::temp_dir().join("reachy-rpiboot.log");
+    let _ = std::fs::remove_file(&out_file);
 
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err("rpiboot failed (is the WinUSB driver installed?)".to_string())
+    let args = format!(
+        r#"/c ""{}" -d "{}" > "{}" 2>&1""#,
+        crate::win_ps::simplify(bin),
+        crate::win_ps::simplify(dir),
+        out_file.display()
+    );
+    crate::flash::log(&format!("rpiboot: cmd.exe {args}"));
+
+    let code = crate::win_ps::run_elevated(Path::new("cmd.exe"), &args, None)?;
+    let output = std::fs::read_to_string(&out_file).unwrap_or_default();
+    crate::flash::log(&format!(
+        "rpiboot: exit={code}\n--- rpiboot output ---\n{}\n--- end ---",
+        output.trim()
+    ));
+
+    if code == 0 {
+        return Ok(());
     }
+    // Surface what rpiboot actually said; the last lines carry the reason.
+    let tail: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
+    let tail = tail
+        .iter()
+        .rev()
+        .take(4)
+        .rev()
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" / ");
+    Err(format!("rpiboot failed (exit code {code}): {tail}"))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]

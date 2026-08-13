@@ -80,6 +80,40 @@ export function prepareReachy(): Promise<void> {
   return invoke('prepare_reachy');
 }
 
+// ---------------------------------------------------------------------------
+// WinUSB driver (Windows only)
+// ---------------------------------------------------------------------------
+
+/**
+ * State of the WinUSB driver the CM4 needs on Windows.
+ *
+ * `applicable` is false on macOS, where nothing of this exists - callers can
+ * treat the whole struct as "nothing to do" then.
+ */
+export interface WinUsbStatus {
+  applicable: boolean;
+  device_present: boolean;
+  driver_ok: boolean;
+  /** We can bind the driver in-app; otherwise send the user to installer_url. */
+  can_install: boolean;
+  installer_url: string;
+  detail: string;
+}
+
+export function winusbStatus(): Promise<WinUsbStatus> {
+  return invoke<WinUsbStatus>('winusb_status');
+}
+
+/** Bind WinUSB to the CM4 (UAC prompt + Windows driver dialog). */
+export function installWinusbDriver(): Promise<void> {
+  return invoke('install_winusb_driver');
+}
+
+/** The robot is plugged in but Windows can't talk to it until the driver is bound. */
+export function needsWinusbDriver(s: WinUsbStatus | null): boolean {
+  return !!s && s.applicable && s.device_present && !s.driver_ok;
+}
+
 /** Download the OS image into the cache ahead of time. Streams "downloading" progress. */
 export function prefetchImage(): Promise<void> {
   return invoke('prefetch_image');

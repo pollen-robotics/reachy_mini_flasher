@@ -61,3 +61,53 @@ jobs:
 
       - name: Test
         run: cargo test --manifest-path src-tauri/Cargo.toml
+
+  # We bundle rpiboot by unpacking Raspberry Pi's installer, whose internal
+  # layout is not a contract - upstream can move things whenever they rebuild it.
+  # Running the staging script here means a layout change shows up as a red CI
+  # run rather than as a broken release (or worse, a bundle that ships and fails
+  # on a user's machine). Cheap: a download and an extract, no build.
+  rpiboot-staging:
+    name: rpiboot staging (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stage rpiboot from the upstream installer
+        shell: pwsh
+        run: .\scripts\fetch-rpiboot.ps1
+
+      - name: Show what was staged
+        shell: pwsh
+        run: Get-ChildItem -Recurse src-tauri\binaries\rpiboot | Select-Object FullName, Length
+
+  # The Windows-specific code (WinUSB driver binding, volume lock/dismount, the
+  # PowerShell helpers) is compiled by NO other job: the macOS job `cfg`s it out
+  # and there is no Windows release build yet. Without this it can only be found
+  # broken by a user on real hardware.
+  rust-windows:
+    name: Rust (Windows - clippy + test)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # Same placeholder trick as the macOS job: `tauri-build` only checks that
+      # the bundled resource path exists, and the helper is never executed here.
+      - name: Stage placeholder rpiboot resource
+        run: New-Item -ItemType Directory -Force -Path src-tauri/binaries/rpiboot
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --manifest-path src-tauri/Cargo.toml
