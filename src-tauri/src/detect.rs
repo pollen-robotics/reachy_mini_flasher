@@ -65,15 +65,37 @@ fn in_download_mode() -> bool {
     // nusb 0.2 returns a `MaybeFuture`; resolve it synchronously with `.wait()`
     // since detection runs on a blocking Tauri command.
     use nusb::MaybeFuture;
-    match nusb::list_devices().wait() {
+    let seen_by_nusb = match nusb::list_devices().wait() {
         Ok(devices) => devices.into_iter().any(|d| d.vendor_id() == BROADCOM_VID),
         Err(_) => false,
-    }
+    };
+    // On Windows nusb only enumerates devices with a user-mode driver bound, so
+    // a CM4 whose WinUSB driver isn't installed yet is invisible here - which
+    // would look exactly like "no robot plugged in". Ask the PnP tree instead,
+    // so the UI can offer to install the driver. No-op on other platforms.
+    seen_by_nusb || crate::win_driver::device_present()
 }
 
 /// Returns the currently connected Reachy, if any.
+///
+/// `async` deliberately: Tauri runs a *synchronous* command on the main thread,
+/// and on Windows this one shells out to PowerShell (`Get-PnpDevice`, through
+/// `win_driver::device_present`). The frontend polls it every 1.5s, so as a
+/// blocking command it froze the webview for the length of every process spawn
+/// - most visibly during the driver install, where the window went
+/// "not responding" with no sign that anything was happening. On a worker
+/// thread it costs the UI nothing.
 #[tauri::command]
-pub fn detect_reachy() -> Option<ReachyDevice> {
+pub async fn detect_reachy() -> Option<ReachyDevice> {
+    tauri::async_runtime::spawn_blocking(detect_now)
+        .await
+        // A panic in detection means "we don't know", and not knowing is already
+        // reported as "nothing plugged in" everywhere else in here.
+        .unwrap_or(None)
+}
+
+/// Blocking body of `detect_reachy`, for callers already off the main thread.
+pub fn detect_now() -> Option<ReachyDevice> {
     if sim::enabled() {
         if !sim_connected() {
             return None;
@@ -130,7 +152,7 @@ mod tests {
     fn sim_env_returns_simulated_device() {
         std::env::set_var("REACHY_FLASHER_SIM", "1");
         std::env::set_var("REACHY_FLASHER_SIM_DELAY", "0");
-        let dev = detect_reachy().expect("sim should report a device once connected");
+        let dev = detect_now().expect("sim should report a device once connected");
         assert_eq!(dev.mode, "simulated");
         std::env::remove_var("REACHY_FLASHER_SIM");
         std::env::remove_var("REACHY_FLASHER_SIM_DELAY");
