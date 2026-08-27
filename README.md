@@ -68,9 +68,22 @@ For production, bundle the folder by adding to `src-tauri/tauri.conf.json`:
 "bundle": { "resources": { "binaries/rpiboot": "rpiboot" } }
 ```
 
-On Windows, install the RPiBoot GUI
-([rpiboot_setup.exe](https://github.com/raspberrypi/usbboot/raw/master/win32/rpiboot_setup.exe))
-and copy `rpiboot.exe` + `mass-storage-gadget64` into `src-tauri/binaries/rpiboot/`.
+On Windows, run the PowerShell equivalent instead - it downloads Raspberry Pi's
+installer and unpacks the pieces for you (needs [7-Zip](https://www.7-zip.org/)):
+
+```powershell
+.\scripts\fetch-rpiboot.ps1
+```
+
+```powershell
+$env:REACHY_RPIBOOT_BIN = "$PWD\src-tauri\binaries\rpiboot\rpiboot.exe"
+$env:REACHY_RPIBOOT_DIR = "$PWD\src-tauri\binaries\rpiboot\mass-storage-gadget64"
+$env:REACHY_WDI_SIMPLE_BIN = "$PWD\src-tauri\binaries\rpiboot\wdi-simple.exe"
+```
+
+If you already have RPiBoot installed, the app finds it on its own and none of
+this is needed. See [`docs/WINDOWS.md`](docs/WINDOWS.md) for the current state of
+Windows support.
 
 ### Simulation mode (test without a robot or root)
 
