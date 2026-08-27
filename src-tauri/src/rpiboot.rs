@@ -16,8 +16,12 @@
 //! Resolved from (in order): env overrides, bundled resources, then $PATH.
 
 use std::path::{Path, PathBuf};
+// Only the macOS path shells out directly; Windows elevation goes through
+// `win_ps::run_elevated`.
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use tauri::{AppHandle, Manager};
 
@@ -26,6 +30,15 @@ use crate::sim;
 /// Guards against launching several rpiboot runs at once (the frontend polls
 /// detection every ~1.5s, so download mode would otherwise fire repeatedly).
 static RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// How long to wait for the eMMC to enumerate after rpiboot runs. The CM4
+/// reboots into the mass-storage gadget, so a few seconds is normal.
+const PREPARE_POLLS: u32 = 40;
+const PREPARE_POLL_DELAY: Duration = Duration::from_millis(500);
+/// Shorter wait when rpiboot *reported* a failure. Its exit status is a weak
+/// signal (see `run_rpiboot`), so the eMMC still gets a moment to show up - but
+/// not the full 20s, on a run we already have a reason to disbelieve.
+const FAILED_POLLS: u32 = 8;
 
 fn bin_name() -> &'static str {
     if cfg!(target_os = "windows") {
@@ -56,6 +69,15 @@ fn rpiboot_bin(app: &AppHandle) -> Option<PathBuf> {
             return Some(cand);
         }
     }
+    // Windows: reuse an existing RPiBoot installation. It's what we point users
+    // at for the WinUSB driver, and it brings rpiboot.exe along with it.
+    #[cfg(target_os = "windows")]
+    if let Some(dir) = crate::win_driver::rpiboot_install_dir() {
+        let cand = dir.join(bin_name());
+        if cand.is_file() {
+            return Some(cand);
+        }
+    }
     find_on_path(bin_name())
 }
 
@@ -73,6 +95,13 @@ fn gadget_dir(app: &AppHandle) -> Option<PathBuf> {
             return Some(cand);
         }
     }
+    #[cfg(target_os = "windows")]
+    if let Some(dir) = crate::win_driver::rpiboot_install_dir() {
+        let cand = dir.join("mass-storage-gadget64");
+        if cand.is_dir() {
+            return Some(cand);
+        }
+    }
     None
 }
 
@@ -81,7 +110,7 @@ fn gadget_dir(app: &AppHandle) -> Option<PathBuf> {
 /// No-op in simulation mode or when the eMMC is already exposed (`ready`).
 /// Otherwise runs `rpiboot -d <gadget_dir>` with elevated privileges and
 /// blocks until it completes; the eMMC then enumerates as a disk and the next
-/// `detect_reachy` poll reports `ready`.
+/// `detect_now` poll reports `ready`.
 #[tauri::command]
 pub async fn prepare_reachy(app: AppHandle) -> Result<(), String> {
     if sim::enabled() {
@@ -89,7 +118,7 @@ pub async fn prepare_reachy(app: AppHandle) -> Result<(), String> {
     }
 
     // Already exposed? nothing to do.
-    if let Some(dev) = crate::detect::detect_reachy() {
+    if let Some(dev) = crate::detect::detect_now() {
         if dev.mode == "ready" {
             return Ok(());
         }
@@ -109,6 +138,14 @@ pub async fn prepare_reachy(app: AppHandle) -> Result<(), String> {
 }
 
 fn run_rpiboot(app: &AppHandle) -> Result<(), String> {
+    // Windows: with no WinUSB driver bound to the CM4, rpiboot can't open the
+    // device at all. Say so up front - the UI turns this into an "install the
+    // driver" action - instead of letting rpiboot fail with a generic error.
+    #[cfg(target_os = "windows")]
+    if let Some(reason) = crate::win_driver::blocking_reason(app) {
+        return Err(reason);
+    }
+
     let bin = rpiboot_bin(app).ok_or_else(|| {
         "rpiboot was not found. Install it (see README) or set REACHY_RPIBOOT_BIN.".to_string()
     })?;
@@ -127,7 +164,60 @@ fn run_rpiboot(app: &AppHandle) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let (bin, dir) = stage_artifacts_macos(app, &bin, &dir)?;
 
-    run_elevated_rpiboot(&bin, &dir)
+    let outcome = run_elevated_rpiboot(&bin, &dir);
+
+    // A declined privilege prompt means rpiboot never ran, so there is nothing
+    // to wait for. Polling anyway held the UI for 20s - spawning a disk query
+    // twice a second - before reporting an error we already had in hand.
+    if let Err(e) = &outcome {
+        if never_started(e) {
+            return Err(e.clone());
+        }
+    }
+
+    // Trust the *effect*, not the exit status.
+    //
+    // Both elevated helpers are launched through a PowerShell shim, and what
+    // that shim reports back is a proxy for success at best: reading an
+    // elevated child's exit code from a non-elevated parent is not dependable,
+    // and rpiboot's own return value is not something we control either. But
+    // whether the eMMC actually appeared is unambiguous and is the only thing
+    // we care about - so wait for it, and only believe the failure if the
+    // storage never shows up.
+    let polls = if outcome.is_ok() { PREPARE_POLLS } else { FAILED_POLLS };
+    for _ in 0..polls {
+        if let Some(dev) = crate::detect::detect_now() {
+            if dev.mode == "ready" {
+                // The eMMC just appeared as removable media, so AutoPlay is
+                // about to drop an Explorer window over the app. Close it -
+                // this returns immediately and cannot fail the preparation.
+                #[cfg(target_os = "windows")]
+                crate::win_volume::close_autoplay_windows(&dev.device);
+                return Ok(());
+            }
+        }
+        std::thread::sleep(PREPARE_POLL_DELAY);
+    }
+
+    match outcome {
+        Err(e) => Err(e),
+        // rpiboot claimed success but nothing appeared: that is a real failure,
+        // just not one rpiboot knew about.
+        Ok(()) => Err("rpiboot finished but the robot's storage never appeared. \
+                       Unplug and re-plug the USB cable (switch on DOWNLOAD), then try again."
+            .to_string()),
+    }
+}
+
+/// True when the elevated helper never launched because the user declined the
+/// privilege prompt (macOS: osascript -128, Windows: `ERROR_CANCELLED`).
+///
+/// Both platforms' messages are matched here rather than the codes: macOS
+/// reports through osascript's text and Windows through `win_ps::DENIED`, and
+/// the only thing this needs to know is "nothing ran".
+fn never_started(err: &str) -> bool {
+    let e = err.to_lowercase();
+    e.contains("authorization was denied") || e.contains("authorization denied")
 }
 
 /// Copy the rpiboot binary and gadget dir into the app cache (outside the
@@ -220,21 +310,20 @@ fn run_elevated_rpiboot(bin: &Path, dir: &Path) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn run_elevated_rpiboot(bin: &Path, dir: &Path) -> Result<(), String> {
-    let ps = format!(
-        "$p = Start-Process -FilePath '{}' -ArgumentList '-d','{}' -Verb RunAs -Wait -PassThru; exit $p.ExitCode",
-        bin.to_string_lossy(),
-        dir.to_string_lossy()
-    );
-    let out = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
-        .output()
-        .map_err(|e| format!("failed to request privileges: {e}"))?;
+    // Captured rather than merely run: rpiboot's console is hidden, and what it
+    // printed is the only thing that ever explains a failure. See
+    // `win_ps::run_elevated_captured`.
+    let args = format!(r#"-d "{}""#, crate::win_ps::simplify(dir));
+    let (code, output) = crate::win_ps::run_elevated_captured(bin, &args, "rpiboot")?;
 
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err("rpiboot failed (is the WinUSB driver installed?)".to_string())
+    if code == 0 {
+        return Ok(());
     }
+    // Surface what rpiboot actually said; the last lines carry the reason.
+    Err(format!(
+        "rpiboot failed (exit code {code}): {}",
+        crate::win_ps::output_tail(&output, 4)
+    ))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]

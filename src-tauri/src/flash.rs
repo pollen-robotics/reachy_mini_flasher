@@ -45,7 +45,7 @@ pub fn emit_download(app: &AppHandle, version: &str, written: u64, total: u64) {
 
 #[tauri::command]
 pub async fn flash_reachy(app: AppHandle) -> Result<(), String> {
-    let device = crate::detect::detect_reachy().ok_or("No Reachy Mini detected over USB.")?;
+    let device = crate::detect::detect_now().ok_or("No Reachy Mini detected over USB.")?;
     if device.mode == "download" {
         return Err(
             "Reachy is still in download mode; its storage isn't exposed yet. Wait for preparation to finish, or re-plug the USB cable."
@@ -243,6 +243,13 @@ pub fn do_flash(
             .output();
     }
 
+    // Windows equivalent of the `diskutil unmountDisk` above, except the locks
+    // have to be *held* for the whole write - hence a guard rather than a call.
+    // Dropping it at the end of this function unlocks the volumes and refreshes
+    // the partition table. See `win_volume` for why this is mandatory.
+    #[cfg(target_os = "windows")]
+    let _disk_lock = crate::win_volume::lock_disk(target)?;
+
     let lower = image_path.to_lowercase();
     let is_gz = lower.ends_with(".gz");
     let is_zip = lower.ends_with(".zip");
@@ -433,6 +440,16 @@ fn flash_elevated(
     let final_content = fs::read_to_string(&progress).unwrap_or_default();
     let _ = fs::remove_file(&progress);
 
+    // The worker records its own verdict in the progress file, and that is the
+    // authoritative one: it is written by the process that did the work. The
+    // exit status has to travel back through an elevation shim, which is a far
+    // weaker signal - so a worker that says DONE succeeded, whatever the shim
+    // reports.
+    if final_content.trim() == "DONE" {
+        emit_progress(app, "done", 1, 1);
+        return Ok(());
+    }
+
     match status {
         Ok(true) => {
             emit_progress(app, "done", 1, 1);
@@ -471,25 +488,55 @@ fn run_elevated(
     target: &str,
     progress: &str,
 ) -> Result<bool, String> {
-    let args = format!(
-        "'flash-worker','{}','{}','{}','{}'",
-        image, bmap, target, progress
-    );
-    let ps = format!(
-        "$p = Start-Process -FilePath '{}' -ArgumentList {} -Verb RunAs -Wait -PassThru; exit $p.ExitCode",
-        exe.to_string_lossy(),
-        args
-    );
-    let out = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
-        .output()
-        .map_err(|e| format!("failed to request privileges: {e}"))?;
-    Ok(out.status.success())
+    // Each argument is double-quoted inside the command line: the image lives
+    // under the app cache (`C:\Users\<name>\AppData\...`), which contains a
+    // space for plenty of users, and the previous comma-separated `-ArgumentList`
+    // array form let PowerShell split those paths into several arguments.
+    let args = format!(r#"flash-worker "{image}" "{bmap}" "{target}" "{progress}""#);
+    let code = crate::win_ps::run_elevated(exe, &args, None)?;
+    Ok(code == 0)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn run_elevated(_: &Path, _: &str, _: &str, _: &str, _: &str) -> Result<bool, String> {
     Err("elevated flashing is only implemented for macOS and Windows".to_string())
+}
+
+/// Diagnostics file for the elevated worker.
+///
+/// The worker is a separate elevated process launched through
+/// `Start-Process -Verb RunAs`, and the release build is a `windows` subsystem
+/// binary - so it has no console, and its stderr is not inherited by anything.
+/// Every `eprintln!` in the flash path therefore goes nowhere, which makes a
+/// failure on a user's machine essentially undebuggable. Route them to a file
+/// next to the progress file instead.
+static LOG_PATH: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+
+/// Append a diagnostic line to the log.
+///
+/// The worker points this at `<progress>.log`; everything else (the GUI
+/// process, notably the rpiboot stage) falls back to a fixed file, because a
+/// GUI build has nowhere else to put diagnostics at all.
+pub fn log(msg: &str) {
+    eprintln!("{msg}");
+    let guard = match LOG_PATH.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let fallback;
+    let path = match guard.as_ref() {
+        Some(p) => Some(p),
+        None => {
+            fallback = std::env::temp_dir().join("reachy-flasher.log");
+            Some(&fallback)
+        }
+    };
+    if let Some(path) = path {
+        use std::io::Write as _;
+        if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(f, "{msg}");
+        }
+    }
 }
 
 /// Entry point for the elevated child process (`flash-worker`).
@@ -502,6 +549,16 @@ pub fn run_flash_worker(args: &[String]) {
     let (image, bmap, target, progress) = (&args[0], &args[1], &args[2], &args[3]);
     let bmap_opt = if bmap == "-" { None } else { Some(bmap.as_str()) };
 
+    // Start the diagnostics file before anything can fail.
+    {
+        let path = std::path::PathBuf::from(format!("{progress}.log"));
+        let _ = fs::remove_file(&path);
+        if let Ok(mut guard) = LOG_PATH.lock() {
+            *guard = Some(path);
+        }
+    }
+    log(&format!("flash-worker target={target} image={image} bmap={bmap}"));
+
     let progress_path = progress.clone();
     let report: Box<dyn FnMut(u64, u64) + Send> = Box::new(move |w, t| {
         let _ = fs::write(&progress_path, format!("{w} {t}"));
@@ -509,10 +566,15 @@ pub fn run_flash_worker(args: &[String]) {
 
     match do_flash(image, bmap_opt, target, report) {
         Ok(()) => {
+            log("flash-worker: OK");
             let _ = fs::write(progress, "DONE");
             std::process::exit(0);
         }
         Err(e) => {
+            // Also to the log: the progress file is deleted as soon as the GUI
+            // has read it, so this is otherwise the one piece of evidence that
+            // does not survive the run.
+            log(&format!("flash-worker: ERR {e}"));
             let _ = fs::write(progress, format!("ERR {e}"));
             std::process::exit(1);
         }
