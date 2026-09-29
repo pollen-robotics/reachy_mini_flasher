@@ -4,11 +4,10 @@ name: Release (macOS)
 # GitHub release. Triggered by pushing a version tag (e.g. `v0.1.0`), or
 # manually via the Actions tab.
 #
-# Two runners produce native builds so both Mac architectures are covered:
-#   - macos-14  -> Apple Silicon (aarch64)
-#   - macos-13  -> Intel        (x86_64)
-# Each runner builds `rpiboot` from source for its own arch, so the bundled
-# helper always matches the app it ships in.
+# Native Apple Silicon (aarch64) build on macos-14. Intel (macos-13) was
+# dropped: GitHub retired those runners and jobs never got picked up.
+# `rpiboot` is built from source on the runner, so the bundled helper always
+# matches the app it ships in.
 #
 # Code signing / notarization is OPTIONAL: if the APPLE_* secrets are set the
 # build is signed + notarized, otherwise an unsigned build is produced (users
@@ -31,8 +30,6 @@ jobs:
         include:
           - runner: macos-14
             target: aarch64-apple-darwin
-          - runner: macos-13
-            target: x86_64-apple-darwin
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout repository
