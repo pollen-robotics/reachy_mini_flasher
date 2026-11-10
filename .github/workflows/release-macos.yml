@@ -4,7 +4,7 @@ name: Release (macOS)
 # GitHub release. Triggered by pushing a version tag (e.g. `v0.1.0`), or
 # manually via the Actions tab.
 #
-# Native Apple Silicon (aarch64) build on macos-14. Intel (macos-13) was
+# Native Apple Silicon (aarch64) build on macos-15. Intel (macos-13) was
 # dropped: GitHub retired those runners and jobs never got picked up.
 # `rpiboot` is built from source on the runner, so the bundled helper always
 # matches the app it ships in.
@@ -31,7 +31,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
+          - runner: macos-15
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.runner }}
     steps:
