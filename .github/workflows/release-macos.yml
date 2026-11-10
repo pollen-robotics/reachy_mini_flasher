@@ -127,8 +127,24 @@ jobs:
           prerelease: false
           args: --target ${{ matrix.target }}
 
-      - name: Check Gatekeeper accepts the app
+      # tauri-action notarizes the .app but only signs the .dmg around it, and
+      # Gatekeeper rejects an unnotarized DMG opened from a browser download.
+      - name: Notarize & staple the DMG
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', github.run_number) }}
         run: |
-          APP="src-tauri/target/${{ matrix.target }}/release/bundle/macos/Reachy Mini Flasher.app"
-          spctl --assess --type execute --verbose=4 "$APP"
-          xcrun stapler validate "$APP"
+          DMG="$(ls src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg)"
+          xcrun notarytool submit "$DMG" --wait \
+            --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER"
+          xcrun stapler staple "$DMG"
+          gh release upload "$TAG" "$DMG" --clobber
+
+      - name: Check Gatekeeper accepts the app and the DMG
+        run: |
+          BUNDLE="src-tauri/target/${{ matrix.target }}/release/bundle"
+          spctl --assess --type execute --verbose=4 "$BUNDLE/macos/Reachy Mini Flasher.app"
+          xcrun stapler validate "$BUNDLE/macos/Reachy Mini Flasher.app"
+          spctl --assess --type open --context context:primary-signature --verbose=4 "$BUNDLE"/dmg/*.dmg
