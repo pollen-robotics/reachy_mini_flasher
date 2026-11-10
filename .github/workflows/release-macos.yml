@@ -10,8 +10,11 @@ name: Release (macOS)
 # matches the app it ships in.
 #
 # Code signing / notarization is OPTIONAL: if the APPLE_* secrets are set the
-# build is signed + notarized, otherwise an unsigned build is produced (users
-# then have to right-click > Open the first time).
+# build is signed + notarized, otherwise the bundle is ad-hoc signed
+# (`bundle.macOS.signingIdentity: "-"`). Without that ad-hoc bundle signature a
+# downloaded (quarantined) app is reported as "damaged" with no way past it;
+# with it, users get "Open Anyway" in System Settings > Privacy & Security on
+# first launch.
 
 on:
   workflow_dispatch:
@@ -73,8 +76,8 @@ jobs:
           # We do NOT reference any APPLE_* secret here on purpose: the
           # pollen-robotics org exposes APPLE_* secrets (for the mobile app) that
           # would otherwise be injected and make tauri-action attempt (and fail)
-          # a codesign with an incompatible certificate. Producing an unsigned
-          # build instead (users right-click > Open on first launch).
+          # a codesign with an incompatible certificate. Producing an ad-hoc
+          # signed build instead (users "Open Anyway" on first launch).
           # To enable signing later, add repo-level APPLE_* secrets in the format
           # tauri expects and re-add them here (see https://tauri.app/distribute/sign/macos/).
         with:
