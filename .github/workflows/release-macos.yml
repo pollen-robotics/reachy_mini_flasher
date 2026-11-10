@@ -9,12 +9,11 @@ name: Release (macOS)
 # `rpiboot` is built from source on the runner, so the bundled helper always
 # matches the app it ships in.
 #
-# Code signing / notarization is OPTIONAL: if the APPLE_* secrets are set the
-# build is signed + notarized, otherwise the bundle is ad-hoc signed
-# (`bundle.macOS.signingIdentity: "-"`). Without that ad-hoc bundle signature a
-# downloaded (quarantined) app is reported as "damaged" with no way past it;
-# with it, users get "Open Anyway" in System Settings > Privacy & Security on
-# first launch.
+# The app is signed with Pollen's Developer ID and notarized with an App Store
+# Connect API key (repo secrets APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD,
+# APPLE_SIGNING_IDENTITY, APPLE_API_KEY, APPLE_API_KEY_CONTENT,
+# APPLE_API_ISSUER), so it opens without any Gatekeeper prompt. Local builds
+# fall back to the ad-hoc `bundle.macOS.signingIdentity: "-"`.
 
 on:
   workflow_dispatch:
@@ -54,7 +53,7 @@ jobs:
           workspaces: src-tauri
 
       - name: Install rpiboot build deps
-        run: brew install libusb pkg-config
+        run: brew install pkg-config
 
       - name: Build & stage rpiboot (+ mass-storage-gadget64)
         run: ./scripts/fetch-rpiboot.sh
@@ -62,7 +61,46 @@ jobs:
       - name: Install JS dependencies
         run: npm ci
 
-      - name: Build & release the macOS app (unsigned)
+      # Imported by hand rather than through `APPLE_CERTIFICATE` because rpiboot
+      # has to be signed before tauri-action runs (next step).
+      - name: Import the Developer ID certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$KEYCHAIN" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/certificate.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" \
+            $(security list-keychains -d user | tr -d '"')
+          security find-identity -v -p codesigning "$KEYCHAIN"
+
+      # Tauri signs the app, its frameworks and `externalBin` sidecars, but not
+      # `resources`: notarization rejects any executable left ad-hoc signed.
+      - name: Sign rpiboot with the Developer ID
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          codesign --force --options runtime --timestamp \
+            --sign "$APPLE_SIGNING_IDENTITY" src-tauri/binaries/rpiboot/rpiboot
+          codesign --verify --strict --verbose=2 src-tauri/binaries/rpiboot/rpiboot
+
+      - name: Write the App Store Connect API key
+        env:
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+        run: |
+          printf '%s\n' "$APPLE_API_KEY_CONTENT" > "$RUNNER_TEMP/AuthKey.p8"
+          echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/AuthKey.p8" >> "$GITHUB_ENV"
+
+      - name: Build, sign, notarize & release the macOS app
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -72,14 +110,14 @@ jobs:
           # matching public key lives in `tauri.conf.json > plugins.updater`.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # --- Code signing + notarization: intentionally DISABLED -------------
-          # We do NOT reference any APPLE_* secret here on purpose: the
-          # pollen-robotics org exposes APPLE_* secrets (for the mobile app) that
-          # would otherwise be injected and make tauri-action attempt (and fail)
-          # a codesign with an incompatible certificate. Producing an ad-hoc
-          # signed build instead (users "Open Anyway" on first launch).
-          # To enable signing later, add repo-level APPLE_* secrets in the format
-          # tauri expects and re-add them here (see https://tauri.app/distribute/sign/macos/).
+          # --- Code signing + notarization -------------------------------------
+          # Repo-level secrets, which take precedence over the org's APPLE_*
+          # ones (those belong to the mobile app's distribution certificate).
+          # The certificate is already in the keychain imported above, so
+          # APPLE_CERTIFICATE is deliberately not passed here.
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         with:
           # If the flasher lives in a subfolder of the repo, set projectPath here.
           projectPath: .
@@ -88,3 +126,9 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: --target ${{ matrix.target }}
+
+      - name: Check Gatekeeper accepts the app
+        run: |
+          APP="src-tauri/target/${{ matrix.target }}/release/bundle/macos/Reachy Mini Flasher.app"
+          spctl --assess --type execute --verbose=4 "$APP"
+          xcrun stapler validate "$APP"

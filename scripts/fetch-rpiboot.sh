@@ -15,8 +15,12 @@
 # Usage:
 #   ./scripts/fetch-rpiboot.sh
 #
-# Prereqs (macOS):  brew install libusb pkg-config git
+# Prereqs (macOS):  brew install pkg-config git
 #          (Linux):  sudo apt install libusb-1.0-0-dev pkg-config build-essential git
+#
+# On macOS, libusb is built from source and linked statically: the shipped
+# rpiboot must not load a Homebrew dylib (users don't have one), and must run
+# on macOS versions older than the build machine.
 
 set -euo pipefail
 
@@ -26,11 +30,36 @@ DEST="$FLASHER_ROOT/src-tauri/binaries/rpiboot"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+LIBUSB_VERSION=1.0.29
+
+if [ "$(uname -s)" = Darwin ]; then
+  export MACOSX_DEPLOYMENT_TARGET=11.0
+
+  echo "==> Building static libusb $LIBUSB_VERSION"
+  curl -fsSL "https://github.com/libusb/libusb/releases/download/v$LIBUSB_VERSION/libusb-$LIBUSB_VERSION.tar.bz2" \
+    | tar -xj -C "$WORK"
+  (
+    cd "$WORK/libusb-$LIBUSB_VERSION"
+    ./configure --quiet --prefix="$WORK/libusb" --disable-shared --enable-static
+    make -s -j"$(sysctl -n hw.ncpu)" install
+  )
+  export PKG_CONFIG_PATH="$WORK/libusb/lib/pkgconfig"
+  export PKG_CONFIG_LIBDIR="$PKG_CONFIG_PATH"
+  # Makes `pkg-config --libs` (what usbboot's Makefile calls) emit the static deps.
+  sed -i '' 's/^Libs: \(.*\)$/Libs: \1 -lobjc -Wl,-framework,IOKit -Wl,-framework,CoreFoundation -Wl,-framework,Security/' \
+    "$PKG_CONFIG_PATH/libusb-1.0.pc"
+fi
+
 echo "==> Cloning raspberrypi/usbboot"
 git clone --depth 1 https://github.com/raspberrypi/usbboot.git "$WORK/usbboot"
 
 echo "==> Building rpiboot"
 make -C "$WORK/usbboot"
+
+if [ "$(uname -s)" = Darwin ] && otool -L "$WORK/usbboot/rpiboot" | tail -n +2 | grep -Ev '^[[:space:]]*/(usr/lib|System/Library)/'; then
+  echo "rpiboot links a library macOS doesn't ship (listed above)" >&2
+  exit 1
+fi
 
 echo "==> Staging artifacts into $DEST"
 mkdir -p "$DEST"
